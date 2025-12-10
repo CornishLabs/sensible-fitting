@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sensible_fitting import models
 
-fit_data = False  # True => fit. False => plot seed only.
+fit_data = True  # True => fit. False => plot seed only.
 
 model = (
     models.sinusoid(name="wave")
@@ -13,10 +13,10 @@ model = (
 )
 
 rng = np.random.default_rng(2)
-N = 250
+N = 25
 x = np.linspace(0, 1, N)
 
-sigma = 0.2
+sigma = 0.6
 y = model.eval(x, amplitude=2.0, frequency=3.0) + rng.normal(0, sigma, size=x.size)
 
 # One code path: always produces a Run

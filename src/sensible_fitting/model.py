@@ -142,6 +142,7 @@ class Model:
         backend: Literal["scipy.curve_fit", "scipy.minimize", "ultranest"] = "scipy.curve_fit",
         data_format: Optional[str] = None,
         parallel: Optional[Literal[None, "auto"]] = None,
+        skip: bool = False,
         return_run: bool = False,
         backend_options: Optional[Dict[str, Any]] = None,
         rng: Optional[np.random.Generator] = None,
@@ -190,9 +191,11 @@ class Model:
         B = len(datasets)
         values = {n: np.empty((B,), dtype=float) for n in self.param_names}
         errors = {n: np.full((B,), np.nan, dtype=float) for n in self.param_names}
+        seed_values = {n: np.empty((B,), dtype=float) for n in self.param_names}
         covs: List[Optional[np.ndarray]] = []
 
         meta: Dict[str, Any] = {
+            "mode": "seed" if skip else "fit",
             "free_param_names": list(free_names),
             "success": [],
             "message": [],
@@ -207,6 +210,22 @@ class Model:
             p0_map = _initial_guess(self, xi, yi, free_names, rng=rng)
             p0 = np.array([float(p0_map[n]) for n in free_names], dtype=float)
             bounds = _bounds_for_free(self.params, free_names)
+
+            # Record the seed params actually used for this dataset
+            for j, n in enumerate(free_names):
+                seed_values[n][i] = p0[j]
+            for n, fv in fixed_map.items():
+                seed_values[n][i] = float(fv)
+
+            if skip:
+                meta["success"].append(True)
+                meta["message"].append("skipped (seed only)")
+                for j, n in enumerate(free_names):
+                    values[n][i] = p0[j]
+                for n, fv in fixed_map.items():
+                    values[n][i] = float(fv)
+                covs.append(None)
+                continue
 
             if backend != "scipy.curve_fit":
                 raise NotImplementedError("v1 MVP implements only backend='scipy.curve_fit'.")
@@ -236,43 +255,66 @@ class Model:
             else:
                 covs.append(None)
 
+        have_any_cov = any(c is not None for c in covs)
+
         # Build param views + cov
         if batch_shape == ():
             items: Dict[str, ParamView] = {}
+            seed_items: Dict[str, ParamView] = {}
             for n in self.param_names:
                 spec = _spec_by_name(self.params, n)
                 v = float(values[n][0])
                 e = float(errors[n][0])
+                sv = float(seed_values[n][0])
                 items[n] = ParamView(
                     name=n,
                     value=v,
-                    error=(None if np.isnan(e) else e),
+                    error=None if (spec.fixed or not have_any_cov) else e,
+                    fixed=spec.fixed,
+                    bounds=spec.bounds,
+                    derived=False,
+                )
+                seed_items[n] = ParamView(
+                    name=n,
+                    value=sv,
+                    error=None,
                     fixed=spec.fixed,
                     bounds=spec.bounds,
                     derived=False,
                 )
             cov = covs[0] if covs and covs[0] is not None else None
-            results = Results(batch_shape=(), params=ParamsView(items), cov=cov, backend=backend, meta=meta)
+            results = Results(batch_shape=(), params=ParamsView(items), seed=ParamsView(seed_items), cov=cov, backend=backend, meta=meta)
         else:
             items = {}
+            seed_items = {}
             for n in self.param_names:
                 spec = _spec_by_name(self.params, n)
                 v = unflatten_batch(values[n], batch_shape)
                 e = unflatten_batch(errors[n], batch_shape)
+                sv = unflatten_batch(seed_values[n], batch_shape)
                 items[n] = ParamView(
                     name=n,
                     value=v,
-                    error=None if spec.fixed else e,
+                    error=None if (spec.fixed or not have_any_cov) else e,
                     fixed=spec.fixed,
                     bounds=spec.bounds,
                     derived=False,
                 )
+                seed_items[n] = ParamView(
+                    name=n,
+                    value=sv,
+                    error=None,
+                    fixed=spec.fixed,
+                    bounds=spec.bounds,
+                    derived=False,
+                )
+
             if all(c is not None for c in covs):
                 cov = np.stack([c for c in covs], axis=0)
                 cov = unflatten_batch(cov, batch_shape)
             else:
                 cov = None
-            results = Results(batch_shape=batch_shape, params=ParamsView(items), cov=cov, backend=backend, meta=meta)
+            results = Results(batch_shape=batch_shape, params=ParamsView(items), seed=ParamsView(seed_items), cov=cov, backend=backend, meta=meta)
 
         # Post-fit derived params (v1): depend only on fitted params
         if self.derived:

@@ -21,6 +21,7 @@ class Band:
 class Results:
     batch_shape: Tuple[int, ...]
     params: ParamsView
+    seed: Optional[ParamsView] = None
     cov: Optional[np.ndarray] = None
     backend: str = ""
     meta: Dict[str, Any] = None
@@ -37,7 +38,7 @@ class Results:
                 return v
             return a[idx]
 
-        new_items = {}
+        new_items: Dict[str, ParamView] = {}
         for name, pv in self.params.items():
             new_items[name] = ParamView(
                 name=name,
@@ -48,6 +49,22 @@ class Results:
                 derived=pv.derived,
                 meta=pv.meta,
             )
+
+        new_seed = None
+        if self.seed is not None:
+            seed_items: Dict[str, ParamView] = {}
+            for name, pv in self.seed.items():
+                seed_items[name] = ParamView(
+                    name=name,
+                    value=_slice(pv.value),
+                    error=_slice(pv.error),
+                    fixed=_slice(pv.fixed) if isinstance(pv.fixed, np.ndarray) else pv.fixed,
+                    bounds=pv.bounds,
+                    derived=pv.derived,
+                    meta=pv.meta,
+                )
+            new_seed = ParamsView(seed_items)
+
 
         cov = self.cov
         if cov is not None and np.asarray(cov).ndim >= 3:
@@ -63,6 +80,7 @@ class Results:
         return Results(
             batch_shape=tuple(new_batch_shape),
             params=ParamsView(new_items),
+            seed=new_seed,
             cov=cov,
             backend=self.backend,
             meta=self.meta,
