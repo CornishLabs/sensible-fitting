@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from fitwrap import Model
+from sensible_fitting import Model
 
 def line(x, m, b):
     return m * x + b

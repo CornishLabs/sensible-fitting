@@ -1,5 +1,5 @@
 import numpy as np
-from fitwrap import Model
+from sensible_fitting import Model
 
 def gaussian(x, amp, mu, sigma):
     return amp * np.exp(-0.5 * ((x - mu)/sigma)**2)

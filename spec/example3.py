@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from fitwrap import Model
+from sensible_fitting import Model
 
 def wave(x, amplitude, frequency, offset, phase):
     return offset + amplitude*np.sin(2*np.pi*frequency*x + phase)

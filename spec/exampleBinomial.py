@@ -9,7 +9,7 @@ We fit by maximizing log-likelihood (i.e. minimizing negative log-likelihood).
 import numpy as np
 import matplotlib.pyplot as plt
 
-from fitwrap import Model  # imagined API
+from sensible_fitting import Model  # imagined API
 
 # ----------------------------
 # 1) Define a probability model p(x) (must be in [0,1])

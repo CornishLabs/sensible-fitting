@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from fitwrap import models
+from sensible_fitting import models
 
 # Start from a rich, prebuilt sinusoid model with good defaults
 base = models.sinusoid(name="sinusoid")  # amplitude, offset, frequency, phase

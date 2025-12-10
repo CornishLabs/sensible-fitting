@@ -1,4 +1,4 @@
-"""fitwrap public API."""
+"""sensible_fitting public API."""
 from .model import Model
 from .run import Run, Results, Band
 from . import models

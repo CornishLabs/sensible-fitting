@@ -1,5 +1,5 @@
 import numpy as np
-from fitwrap import models
+from sensible_fitting import models
 
 model = models.straight_line()
 

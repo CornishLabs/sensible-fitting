@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from fitwrap import models
+from sensible_fitting import models
 
 model = (
     models.sinusoid(name="wave")

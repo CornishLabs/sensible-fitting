@@ -1,4 +1,4 @@
-"""fitwrap v1 API SPEC (executable-looking pseudocode)
+"""sensible_fitting v1 API SPEC (executable-looking pseudocode)
 
 Goal
 ----
@@ -469,7 +469,7 @@ class Model:
 
 
 # -----------------------------------------------------------------------------
-# Convenience module: fitwrap.models (prebuilt models)
+# Convenience module: sensible_fitting.models (prebuilt models)
 # -----------------------------------------------------------------------------
 
 
@@ -879,7 +879,7 @@ Where yerr_low is downward error (y - low), yerr_high is upward error (high - y)
 A) Parameter constraints/ties DURING fitting
 --------------------------------------------
 Competitors like lmfit allow algebraic constraints: param.expr depends on other params.
-In fitwrap, a v2 feature could allow:
+In sensible_fitting, a v2 feature could allow:
 - model.tie(name=...) / model.expr(...) / model.constrain(...)
 - ties affect the free parameterization and thus the fit
 

@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from fitwrap import Model
+from sensible_fitting import Model
 
 # 1) define model from plain function signature (params inferred from args)
 def line(x, m, b):

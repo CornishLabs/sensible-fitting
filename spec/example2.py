@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from fitwrap import models
+from sensible_fitting import models
 
 # Pre-baked model: straight line
 # (still supports bounds/guessers/fixes)
