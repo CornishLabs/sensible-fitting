@@ -129,14 +129,31 @@ class Run:
 
     def __getitem__(self, idx) -> "Run":
         sub_results = self.results[idx]
+
         sub_data = None
         if self.data is not None:
             sub_data = {}
+            bs = self.results.batch_shape  # batch shape *before* slicing
+
             for k, v in self.data.items():
-                if isinstance(v, (list, tuple)):
+                # Ragged batch stores list-of-datasets; index directly.
+                if isinstance(v, list):
                     sub_data[k] = v[idx]
+
+                # Structured payload tuples like (y, sigma) or (y, lo, hi):
+                # slice any numpy array that carries the batch dimension.
+                elif isinstance(v, tuple):
+                    parts = []
+                    for part in v:
+                        if isinstance(part, np.ndarray) and bs != () and part.shape[: len(bs)] == bs:
+                            parts.append(part[idx])
+                        else:
+                            parts.append(part)
+                    sub_data[k] = tuple(parts)
+
                 else:
                     sub_data[k] = v
+
         return Run(
             model=self.model,
             results=sub_results,
@@ -145,6 +162,7 @@ class Run:
             meta=self.meta,
             data=sub_data,
         )
+
 
     def band(
         self,

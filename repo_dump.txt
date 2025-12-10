@@ -1,0 +1,2456 @@
+
+
+# === README.md ===
+
+# sensible-fitting
+An overarching framework wrapping fitting libraries/functions providing a common API for different backends. It (opinionatedly) focuses on fit functions related to AMO physics. It helps to guess seed parameters and provides a unified and sensible API that is quick to use. This library is currently just used in our labs, but I indend to make it 'nice' for public good at some point.
+
+This project was born out of the desire to replace the (`oitg`)[https://github.com/OxfordIonTrapGroup/oitg]
+dependency of (`ndscan`)[https://github.com/OxfordIonTrapGroup/ndscan]. This dependency primarily comes through the plotting functions.
+
+
+# === dump_code.py ===
+
+#!/usr/bin/env python3
+from pathlib import Path
+
+ROOT = Path(".").resolve()
+OUT = Path("repo_dump.txt")
+
+INCLUDE = {".py", ".toml", ".md"}
+EXCLUDE_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache", ".mypy_cache", "dist", "build"}
+EXCLUDE_FILES_SUFFIX = {".pyc"}
+
+def should_skip(path: Path) -> bool:
+    if any(part in EXCLUDE_DIRS for part in path.parts):
+        return True
+    if path.suffix in EXCLUDE_FILES_SUFFIX:
+        return True
+    return False
+
+files = []
+for p in ROOT.rglob("*"):
+    if not p.is_file():
+        continue
+    if should_skip(p):
+        continue
+    if p.suffix not in INCLUDE:
+        continue
+    files.append(p)
+
+files.sort()
+
+with OUT.open("w", encoding="utf-8") as f:
+    for p in files:
+        rel = p.relative_to(ROOT)
+        f.write(f"\n\n# === {rel} ===\n\n")
+        try:
+            f.write(p.read_text(encoding="utf-8"))
+        except UnicodeDecodeError:
+            f.write("<binary or non-utf8 file skipped>\n")
+
+print(f"Wrote {OUT} with {len(files)} files.")
+
+
+# === examples/01_line.py ===
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sensible_fitting import Model
+
+def line(x, m, b):
+    return m * x + b
+
+model = Model.from_function(line, name="straight line")
+
+rng = np.random.default_rng(0)
+x = np.linspace(0, 10, 50)
+y_true = line(x, 2.0, -1.0)
+sigma = 0.6
+y = y_true + rng.normal(0, sigma, size=x.size)
+
+run = model.fit(x=x, y=(y, sigma), backend="scipy.curve_fit", return_run=True).squeeze()
+res = run.results
+
+print(res.params["m"].value, "±", res.params["m"].error)
+print(res.params["b"].value, "±", res.params["b"].error)
+print(res.summary(digits=4))
+
+fig, ax = plt.subplots()
+ax.errorbar(x, y, yerr=sigma, fmt="o", ms=4, capsize=2, label="data")
+
+xg = np.linspace(x.min(), x.max(), 400)
+ax.plot(xg, run.model.eval(xg, params=res.params), label="fit")
+
+band = run.band(xg, nsamples=400, level=2)
+ax.fill_between(xg, band.low, band.high, alpha=0.2, label="~2σ band")
+
+ax.legend()
+ax.set_xlabel("x")
+ax.set_ylabel("y")
+plt.show()
+
+
+# === examples/02_batch_common_x.py ===
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sensible_fitting import models
+
+model = (
+    models.sinusoid(name="wave")
+    .fix(offset=0.0, phase=np.pi/3)
+    .bound(amplitude=(0.2, 5.0), frequency=(1.0, 6.0))
+    .guess(frequency=2.8)
+    .autoguess("amplitude")
+)
+
+rng = np.random.default_rng(2)
+N_SYSTEMS, N = 4, 250
+x = np.linspace(0, 1, N)
+
+A0, F0 = 2.0, 3.0
+A = A0*(1 + 0.05*rng.normal(size=N_SYSTEMS))
+F = F0*(1 + 0.02*rng.normal(size=N_SYSTEMS))
+
+sigma = 0.2
+y_clean = np.stack([model.eval(x, amplitude=A[i], frequency=F[i]) for i in range(N_SYSTEMS)])
+y = y_clean + rng.normal(0, sigma, size=y_clean.shape)
+
+run = model.fit(x=x, y=(y, sigma), backend="scipy.curve_fit", return_run=True)
+res = run.results
+print(res.summary(digits=4))
+
+fig, axs = plt.subplots(2, 2, figsize=(10, 7), sharex=True, sharey=True)
+axs = axs.ravel()
+xg = np.linspace(x.min(), x.max(), 500)
+
+for i, ax in enumerate(axs):
+    ax.errorbar(x, y[i], yerr=sigma, fmt=".", ms=3, label=f"data {i}")
+    yi = run.model.eval(xg, params=res[i].params)
+    ax.plot(xg, yi, label="fit")
+    band = run[i].band(xg, nsamples=300, level=2)
+    ax.fill_between(xg, band.low, band.high, alpha=0.2)
+    ax.set_title(f"system {i}")
+    ax.legend()
+
+plt.show()
+
+
+# === examples/03_batch_ragged_x.py ===
+
+import numpy as np
+from sensible_fitting import models
+
+model = models.straight_line()
+
+rng = np.random.default_rng(123)
+xs = []
+ys = []
+
+for i in range(3):
+    n = 30 + 10 * i
+    x = np.sort(rng.uniform(-2, 2, size=n))
+    sigma = 0.1 + 0.05 * rng.random(size=n)
+    y = 0.5 * x - 0.1 + rng.normal(0, sigma)
+    xs.append(x)
+    ys.append((y, sigma))
+
+run = model.fit(x=xs, y=ys, backend="scipy.curve_fit", return_run=True)
+print(run.results.summary(digits=4))
+
+
+# === examples/04_backend_swap.py ===
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sensible_fitting import Model
+
+def line(x, m, b):
+    return m*x + b
+
+# bounds (useful for future Bayesian backends)
+model = Model.from_function(line).bound(m=(-10,10), b=(-10,10))
+
+rng = np.random.default_rng(5)
+x = np.linspace(0, 4, 50)
+sigma = 0.3
+y = line(x, 1.7, -0.4) + rng.normal(0, sigma, size=x.size)
+
+run_cf = model.fit(x=x, y=(y, sigma), backend="scipy.curve_fit", return_run=True).squeeze()
+
+fig, ax = plt.subplots()
+ax.errorbar(x, y, yerr=sigma, fmt=".", label="data")
+
+xg = np.linspace(x.min(), x.max(), 400)
+ax.plot(xg, run_cf.model.eval(xg, params=run_cf.results.params), label="curve_fit")
+
+band_cf = run_cf.band(xg, level=2, method="covariance")
+ax.fill_between(xg, band_cf.low, band_cf.high, alpha=0.2, label="curve_fit ~2σ")
+
+ax.legend()
+plt.show()
+
+
+# === examples/05_derived_params.py ===
+
+import numpy as np
+from sensible_fitting import Model
+
+def gaussian(x, amp, mu, sigma):
+    return amp * np.exp(-0.5 * ((x - mu)/sigma)**2)
+
+model = (
+    Model.from_function(gaussian)
+      .bound(amp=(0, None), sigma=(1e-6, None))
+      .derive("fwhm", lambda p: 2.354820045 * p["sigma"], doc="Full-width at half maximum")
+)
+
+rng = np.random.default_rng(0)
+x = np.linspace(-3, 3, 200)
+sigma_y = 0.05
+y = model.eval(x, amp=1.0, mu=0.2, sigma=0.7) + rng.normal(0, sigma_y, size=x.size)
+
+run = model.fit(x=x, y=(y, sigma_y), backend="scipy.curve_fit", return_run=True).squeeze()
+res = run.results
+
+print("sigma:", res.params["sigma"].value)
+print("fwhm :", res.params["fwhm"].value, "(derived:", res.params["fwhm"].derived, ")")
+
+
+# === pyproject.toml ===
+
+[project]
+name = "sensible-fitting"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "tomhepz", email = "9285131+tomhepz@users.noreply.github.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "lmfit>=1.3.4",
+    "numpy>=2.3.5",
+    "scipy>=1.16.3",
+    "ultranest>=4.4.0",
+    "uncertainties>=3.2.3",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.11,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "matplotlib>=3.10.7",
+    "pyqt6>=6.10.1",
+]
+
+
+# === spec/example1.py ===
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sensible_fitting import Model
+
+# 1) define model from plain function signature (params inferred from args)
+def line(x, m, b):
+    return m*x + b
+
+model = Model.from_function(line, name="straight line")
+
+# 2) make fake data
+rng = np.random.default_rng(0)
+x = np.linspace(0, 10, 50)
+y_true = line(x, 2.0, -1.0)
+sigma = 0.6
+y = y_true + rng.normal(0, sigma, size=x.size)
+
+# 3) fit (y, sigma) => Gaussian likelihood inferred
+run = model.fit(
+    x=x,
+    y=(y, sigma),                 # symmetric errors
+    backend="scipy.curve_fit",
+    return_run=True,
+)
+
+run = run.squeeze()               # explicit: errors if >1 fit
+res = run.results                 # now “scalar-ish” in the sense: batch dim removed
+
+# 4) print results (slice-first, but now single-fit so param selection is scalar)
+print(res.params["m"]["value"], "±", res.params["m"]["error"])
+print(res.params["b"]["value"], "±", res.params["b"]["error"])
+print(res.summary(digits=4))
+
+# 5) plot data + fit line + 2σ band
+fig, ax = plt.subplots()
+
+# points + error bars
+ax.errorbar(x, y, yerr=sigma, fmt="o", ms=4, capsize=2, label="data")
+
+# fit line
+xg = np.linspace(x.min(), x.max(), 400)
+yg = run.model.eval(xg, params=res.params)          # params is structured scalar-ish
+ax.plot(xg, yg, label="fit")
+
+# 2σ band via covariance sampling (helper lives on run/plot utils)
+# (samples theta ~ N(theta_hat, cov), eval, percentile band)
+band = run.band(xg, nsamples=400, interval=0.954)   # returns (low, high)
+ax.fill_between(xg, band.low, band.high, alpha=0.2, label="~2σ band")
+
+ax.legend()
+ax.set_xlabel("x")
+ax.set_ylabel("y")
+plt.show()
+
+
+# === spec/example2.py ===
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sensible_fitting import models
+
+# Pre-baked model: straight line
+# (still supports bounds/guessers/fixes)
+model = models.straight_line().bound(m=(-10, 10))
+
+rng = np.random.default_rng(1)
+x = np.linspace(-2, 2, 60)
+sigma = 0.15
+y = 0.7*x + 0.2 + rng.normal(0, sigma, size=x.size)
+
+run = model.fit(x=x, y=(y, sigma), backend="scipy.curve_fit", return_run=True).squeeze()
+res = run.results
+
+print(res.summary(digits=6))
+
+fig, ax = plt.subplots()
+ax.errorbar(x, y, yerr=sigma, fmt=".", label="data")
+
+xg = np.linspace(x.min(), x.max(), 400)
+ax.plot(xg, run.model.eval(xg, params=res.params), label="fit")
+
+band = run.band(xg, nsamples=500, interval=0.954)
+ax.fill_between(xg, band.low, band.high, alpha=0.2, label="~2σ band")
+
+ax.legend()
+plt.show()
+
+
+# === spec/example3.py ===
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sensible_fitting import Model
+
+def wave(x, amplitude, frequency, offset, phase):
+    return offset + amplitude*np.sin(2*np.pi*frequency*x + phase)
+
+model = (
+    Model.from_function(wave, name="wave")
+      .fix(offset=0.0, phase=np.pi/3)
+      .bound(amplitude=(0.2, 5.0), frequency=(1.0, 6.0))
+      .guess(frequency=2.8)
+      .autoguess("amplitude")
+)
+
+@model.guesser
+def guess_amp(x, y, g):
+    g.amplitude = 0.5*(y.max() - y.min())
+
+# make 4 datasets
+rng = np.random.default_rng(2)
+N_SYSTEMS, N = 4, 250
+x = np.linspace(0, 1, N)
+
+A0, F0 = 2.0, 3.0
+A = A0*(1 + 0.05*rng.normal(size=N_SYSTEMS))
+F = F0*(1 + 0.02*rng.normal(size=N_SYSTEMS))
+
+sigma = 0.2
+y_clean = np.stack([model.eval(x, amplitude=A[i], frequency=F[i]) for i in range(N_SYSTEMS)])
+y = y_clean + rng.normal(0, sigma, size=y_clean.shape)
+
+# Batch fit: y has shape (systems, N); sigma scalar broadcasts
+run = model.fit(
+    x=x,
+    y=(y, sigma),
+    backend="scipy.curve_fit",
+    parallel="auto",
+    return_run=True
+)
+
+res = run.results  # batch-shaped results
+
+# print: nice table
+print(res.summary(digits=4))
+
+# slicing semantics:
+print(res[0:2]["frequency"]["value"])  # (2,)
+
+# plot on grid
+fig, axs = plt.subplots(2, 2, figsize=(10, 7), sharex=True, sharey=True)
+axs = axs.ravel()
+
+xg = np.linspace(x.min(), x.max(), 500)
+
+for i, ax in enumerate(axs):
+    ax.errorbar(x, y[i], yerr=sigma, fmt=".", ms=3, label=f"data {i}")
+
+    # fit line for dataset i
+    yi = run.model.eval(xg, params=res[i].params)
+    ax.plot(xg, yi, label="fit")
+
+    # 2σ band per dataset i
+    band = run[i].band(xg, nsamples=300, interval=0.954)  # indexing run yields a sub-run
+    ax.fill_between(xg, band.low, band.high, alpha=0.2)
+
+    ax.set_title(f"system {i}")
+    ax.legend()
+
+plt.show()
+
+
+# === spec/example4.py ===
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sensible_fitting import models
+
+# Start from a rich, prebuilt sinusoid model with good defaults
+base = models.sinusoid(name="sinusoid")  # amplitude, offset, frequency, phase
+
+# Specialise it: fix offset and phase (physics constraints)
+restricted = base.fix(offset=0.0, phase=np.pi/3)
+
+# Put bounds and a manual frequency seed
+restricted = (
+    restricted
+      .bound(amplitude=(0.2, 5.0), frequency=(1.0, 10.0))
+      .guess(frequency=3.1)
+)
+
+# Add a smarter guesser that can estimate frequency from data
+# (could be Lomb-Scargle internally; user doesn't care)
+@restricted.guesser
+def smart_init(x, y, g):
+    # If user supplied frequency guess, keep it. Otherwise infer.
+    if g.is_unset("frequency"):
+        g.frequency = restricted.estimate_frequency(x, y, method="lombscargle")
+
+    # amplitude estimate robust-ish
+    g.amplitude = np.quantile(y, 0.95) - np.quantile(y, 0.05)
+
+# Fake data
+rng = np.random.default_rng(7)
+x = np.linspace(0, 1, 200)
+sigma = 0.15
+y = restricted.eval(x, amplitude=1.8, frequency=3.3) + rng.normal(0, sigma, size=x.size)
+
+# Fit
+run = restricted.fit(x=x, y=(y, sigma), backend="scipy.curve_fit", return_run=True).squeeze()
+res = run.results
+print(res.summary(digits=5))
+
+# Plot
+fig, ax = plt.subplots()
+ax.errorbar(x, y, yerr=sigma, fmt=".", label="data")
+
+xg = np.linspace(x.min(), x.max(), 400)
+ax.plot(xg, run.model.eval(xg, params=res.params), label="fit")
+
+band = run.band(xg, nsamples=600, interval=0.954)
+ax.fill_between(xg, band.low, band.high, alpha=0.2, label="~2σ band")
+
+ax.legend()
+plt.show()
+
+
+# === spec/exampleBinomial.py ===
+
+"""
+Binomial data example (API usage only)
+
+We measure, at each x_i, n_trials_i Bernoulli trials and observe n_success_i successes.
+The model predicts a probability p(x; θ) in [0,1].
+We fit by maximizing log-likelihood (i.e. minimizing negative log-likelihood).
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+from sensible_fitting import Model  # imagined API
+
+# ----------------------------
+# 1) Define a probability model p(x) (must be in [0,1])
+# ----------------------------
+def logistic(x, a, b):
+    z = a*x + b
+    return 1 / (1 + np.exp(-z))
+
+model = (
+    Model.from_function(logistic, name="logistic")
+      .bound(a=(-20, 20), b=(-20, 20))
+      .autoguess("a", "b")
+)
+
+# ----------------------------
+# 2) Synthetic binomial dataset: (n_trials, n_success)
+# ----------------------------
+rng = np.random.default_rng(0)
+x = np.linspace(-2, 2, 60)
+
+a_true, b_true = 1.4, -0.2
+p_true = logistic(x, a_true, b_true)
+
+n_trials = 40  # could also be an array per point
+n_success = rng.binomial(n_trials, p_true, size=x.size)
+
+# (Optional) convert to observed proportions + binomial standard error for plotting
+p_obs = n_success / n_trials
+p_se = np.sqrt(p_obs * (1 - p_obs) / n_trials)
+
+# ----------------------------
+# 3) Fit: specify data_format="binomial" so the library uses binomial log-likelihood
+# ----------------------------
+run = model.fit(
+    x=x,
+    y=(n_trials, n_success),
+    data_format="binomial",
+    backend="scipy.minimize",   # likelihood optimiser
+    parallel=None,
+    return_run=True,
+).squeeze()
+
+res = run.result  # (squeezed single-fit run)
+
+print(res.summary(digits=5))
+
+# ----------------------------
+# 4) Plot: proportions + error bars + fitted probability curve + ~2σ band
+# ----------------------------
+fig, ax = plt.subplots()
+
+ax.errorbar(x, p_obs, yerr=2*p_se, fmt="o", ms=4, capsize=2, label="observed (±2σ approx)")
+
+xg = np.linspace(x.min(), x.max(), 400)
+p_fit = run.model.eval(xg, params=res.params)
+ax.plot(xg, p_fit, label="fit")
+
+# Optional: uncertainty band (if covariance available from backend)
+# Uses parameter covariance sampling; gives central 95.4% interval (~2σ).
+try:
+    band = run.band(xg, nsamples=600, interval=0.954)
+    ax.fill_between(xg, band.low, band.high, alpha=0.2, label="~2σ band")
+except Exception:
+    pass
+
+ax.set_ylim(-0.05, 1.05)
+ax.set_xlabel("x")
+ax.set_ylabel("p(success)")
+ax.legend()
+plt.show()
+
+
+# === spec/spec.py ===
+
+"""sensible_fitting v1 API SPEC (executable-looking pseudocode)
+
+Goal
+----
+A small, productive fitting API with:
+- ergonomic model definition (from plain python functions)
+- sensible defaults for common Gaussian fitting
+- optional power backends (e.g., nested sampling) when needed
+- batch fitting (many independent datasets) with clean slicing semantics
+- model-owned seed/guess logic
+- derived parameters computed *after* fitting (v1), with no dependency chains
+
+This file is a *spec*, not an implementation. It is intended to be:
+- readable as a single source of truth
+- runnable only in the sense that it is valid Python syntax
+
+Design principles
+-----------------
+- Models are immutable builder objects: .fix/.bound/.guess return new Models.
+- Parameters are explicit objects: value/error plus metadata.
+- Defaults reduce boilerplate for common cases.
+- Shapes are first-class: batch dims are preserved; slicing works.
+- Provided measurement errors are always treated as absolute measurement errors.
+
+Non-goals (v1)
+--------------
+- parameter constraints/ties that affect the fit (lmfit-style expr during optimization)
+- correlated noise / full covariance Gaussian likelihood
+- robust likelihoods (Student-t)
+- globally-coupled multi-dataset fits (shared parameters across datasets)
+
+See “V2 considerations” at the end.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+    Union,
+)
+
+import numpy as np
+
+
+# -----------------------------------------------------------------------------
+# Core public classes (stubs): Model, Run, Results
+# -----------------------------------------------------------------------------
+
+Array = np.ndarray
+
+
+@dataclass(frozen=True)
+class Band:
+    """Uncertainty band over a grid of x values."""
+
+    low: Array
+    high: Array
+    # Optional extras
+    median: Optional[Array] = None
+    meta: Dict[str, Any] = None
+
+
+@dataclass(frozen=True)
+class ParamView:
+    """A single parameter view.
+
+    Semantics
+    ---------
+    - value/error are numpy arrays of shape == Results.batch_shape
+    - For squeezed single-fit Results, value/error are scalars (0-d arrays) or Python floats.
+    - Supports both attribute and mapping-style access:
+        p.value  == p["value"]
+        p.error  == p["error"]
+    """
+
+    name: str
+    value: Any
+    error: Any
+    fixed: Any = False
+    bounds: Optional[Tuple[Optional[float], Optional[float]]] = None
+    derived: bool = False
+    meta: Dict[str, Any] = None
+
+    # Mapping-like shorthand
+    def __getitem__(self, key: str) -> Any:
+        if key == "value":
+            return self.value
+        if key in ("error", "stderr"):
+            return self.error
+        if key == "fixed":
+            return self.fixed
+        if key == "bounds":
+            return self.bounds
+        if key == "derived":
+            return self.derived
+        raise KeyError(key)
+
+
+class ParamsView(Mapping[str, ParamView]):
+    """Mapping of parameter name -> ParamView.
+
+    v1 requirements:
+    - params["m"].value exists
+    - params["m"]["value"] exists and matches
+    - slicing a Results slices the values/errors inside ParamViews
+    """
+
+    def __getitem__(self, key: str) -> ParamView: ...
+    def __iter__(self): ...
+    def __len__(self): ...
+
+
+@dataclass(frozen=True)
+class Results:
+    """Backend-agnostic fit results.
+
+    Attributes
+    ----------
+    batch_shape:
+        Tuple of batch dimensions. Empty tuple means scalar/single fit.
+
+    params:
+        Mapping-like object with ParamViews.
+        params includes both fitted parameters and post-fit derived parameters.
+
+    cov:
+        Optional covariance matrix for *free* fitted parameters.
+        For batched fits, cov may be an array of shape batch_shape + (P,P).
+
+    backend:
+        Backend identifier string (e.g., "scipy.curve_fit", "ultranest").
+
+    meta:
+        Free-form backend metadata (success flags, messages, nfev, etc.).
+    """
+
+    batch_shape: Tuple[int, ...]
+    params: ParamsView
+    cov: Optional[Array] = None
+    backend: str = ""
+    meta: Dict[str, Any] = None
+
+    # ---- slicing semantics ----
+    def __getitem__(self, idx) -> "Results":
+        """Slice along the batch axes.
+
+        Examples
+        --------
+        res[0] returns a scalar Results (batch_shape=())
+        res[0:2] returns Results with batch_shape=(2,)
+
+        Also supports chained slicing:
+            res[0:2]["m"]["value"]  -> array shape (2,)
+        """
+        raise NotImplementedError
+
+    def summary(self, digits: int = 4) -> str:
+        """Return a human-friendly table.
+
+        v1 requirements:
+        - For scalar results: a compact table of parameters + errors + bounds/fixed flags.
+        - For batched results: a row per batch element, or a condensed table.
+        """
+        raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class Run:
+    """A Run bundles the model, data, backend info, and results.
+
+    Run is the primary object for post-fit utilities:
+    - band() uncertainty bands
+    - slicing to get a sub-run
+    - exposing any posterior samples, if backend provides them
+    """
+
+    model: "Model"
+    results: Results
+    backend: str
+    data_format: str
+    meta: Dict[str, Any] = None
+
+    # optional: store normalized data representation for plotting/reuse
+    data: Dict[str, Any] = None
+
+    def squeeze(self) -> "Run":
+        """Remove batch axes of length 1.
+
+        v1 strictness:
+        - If total batch size > 1, calling squeeze() with no axis raises.
+          (This makes single-fit intent explicit.)
+
+        Example
+        -------
+        run = model.fit(..., return_run=True)
+        run = run.squeeze()  # ok only if exactly one fit is present
+        """
+        raise NotImplementedError
+
+    def __getitem__(self, idx) -> "Run":
+        """Slice a batched run to a sub-run."""
+        raise NotImplementedError
+
+    def band(
+        self,
+        x: Any,
+        *,
+        nsamples: int = 400,
+        level: Optional[float] = None,
+        conf_int: Optional[Tuple[float, float]] = None,
+        method: Literal["auto", "posterior", "covariance"] = "auto",
+        rng: Optional[np.random.Generator] = None,
+    ) -> Band:
+        """Compute an uncertainty band for model predictions.
+
+        Parameters
+        ----------
+        level:
+            Shorthand for a symmetric Normal-equivalent sigma level.
+            Example: level=2 means a central interval with quantiles
+                (Phi(-2), Phi(+2)) ~= (0.02275, 0.97725).
+
+        conf_int:
+            Explicit central interval quantiles, e.g. (0.05, 0.95).
+
+        method:
+            - "auto": prefer posterior samples if present, else covariance
+            - "posterior": require posterior samples (else raise)
+            - "covariance": require covariance (else raise)
+
+        Returns
+        -------
+        Band(low, high)
+
+        Notes
+        -----
+        - For covariance-based bands, we sample parameters from N(theta_hat, cov).
+        - For posterior-based bands, we sample parameters from posterior.
+        """
+        raise NotImplementedError
+
+
+# ----------------------------------------------------------------------------
+# Model definition
+# ----------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ParameterSpec:
+    name: str
+    fixed: bool = False
+    fixed_value: Optional[float] = None
+    bounds: Optional[Tuple[Optional[float], Optional[float]]] = None
+    guess: Optional[float] = None
+    # v1: priors are reserved for Bayesian backends, bounds imply uniform prior
+    prior: Optional[Tuple[str, Tuple[Any, ...]]] = None
+    meta: Dict[str, Any] = None
+
+
+class Guesser(Protocol):
+    """Guesser signature.
+
+    v1: user-defined guessers are pure functions; they mutate a GuessState.
+    """
+
+    def __call__(self, x: Any, y: Any, g: "GuessState") -> None: ...
+
+
+@dataclass
+class GuessState:
+    """Mutable guess container passed to guessers."""
+
+    # Implementations may store guesses in a dict internally.
+    def is_unset(self, name: str) -> bool:
+        raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class DerivedSpec:
+    """Post-fit derived parameter spec (v1).
+
+    Important v1 restriction:
+    - derived parameters are computed only AFTER fitting
+    - derived parameters depend ONLY on fitted params, not on other derived params
+      (no dependency graph; simple one-pass computation)
+    """
+
+    name: str
+    func: Callable[[Mapping[str, float]], float]
+    doc: str = ""
+    meta: Dict[str, Any] = None
+
+
+@dataclass(frozen=True)
+class Model:
+    """A model wraps a callable and parameter metadata."""
+
+    name: str
+    func: Callable[..., Any]
+    param_names: Tuple[str, ...]
+    params: Tuple[ParameterSpec, ...]
+    guessers: Tuple[Guesser, ...] = ()
+    derived: Tuple[DerivedSpec, ...] = ()
+    meta: Dict[str, Any] = None
+
+    # --- constructors ---
+    @staticmethod
+    def from_function(func: Callable[..., Any], *, name: Optional[str] = None) -> "Model":
+        """Create a Model from a python function.
+
+        Signature conventions
+        ---------------------
+        def f(x, p1, p2, ...): ...
+
+        - The first argument is the independent variable container ("x").
+          It may be an array or a tuple/list of arrays.
+        - Remaining positional arguments are treated as model parameters.
+        - Keyword-only parameters are allowed only if they are also treated as parameters.
+          (Implementations may choose to forbid *args/**kwargs in v1 for clarity.)
+        """
+        raise NotImplementedError
+
+    # --- evaluation ---
+    def eval(self, x: Any, *, params: Optional[Mapping[str, Any]] = None, **kwargs) -> Any:
+        """Evaluate model.
+
+        Usage
+        -----
+        model.eval(x, m=2.0, b=-1.0)
+        model.eval(x, params=res.params)
+
+        Notes
+        -----
+        - If params is provided, it may be:
+            * a dict of name->float
+            * a ParamsView/ParamView mapping (where value is extracted)
+        - kwargs may override params entries.
+        """
+        raise NotImplementedError
+
+    # --- builders (immutability) ---
+    def fix(self, **fixed: float) -> "Model":
+        """Fix parameters to constant values."""
+        raise NotImplementedError
+
+    def bound(self, **bounds: Tuple[Optional[float], Optional[float]]) -> "Model":
+        """Set hard bounds for parameters.
+
+        v1 behavior:
+        - For Bayesian backends, bounds imply a Uniform prior if no explicit prior is provided.
+        """
+        raise NotImplementedError
+
+    def guess(self, **guesses: float) -> "Model":
+        """Set manual initial guesses."""
+        raise NotImplementedError
+
+    def autoguess(self, *names: str) -> "Model":
+        """Enable built-in autoguess strategies for the named parameters."""
+        raise NotImplementedError
+
+    def prior(self, **priors: Tuple[str, Any]) -> "Model":
+        """Attach explicit priors for Bayesian backends.
+
+        Examples
+        --------
+        model.prior(m=("normal", 0.0, 5.0), b=("cauchy", 0.0, 2.0))
+
+        Notes
+        -----
+        - v1 may implement priors only for ultranest.
+        - For non-Bayesian backends priors are stored but ignored.
+        """
+        raise NotImplementedError
+
+    def derive(self, name: str, func: Callable[[Mapping[str, float]], float], *, doc: str = "") -> "Model":
+        """Add a post-fit derived parameter.
+
+        v1 restrictions:
+        - derived params computed AFTER fit
+        - derived func must depend only on fitted params (not other derived)
+
+        Example
+        -------
+        model = model.derive("fwhm", lambda p: 2.354820045 * p["sigma"], doc="Gaussian FWHM")
+        """
+        raise NotImplementedError
+
+    def guesser(self, fn: Optional[Guesser] = None):
+        """Decorator to register a custom guesser.
+
+        Usage
+        -----
+        @model.guesser
+        def my_guess(x, y, g):
+            if g.is_unset("amplitude"):
+                g.amplitude = ...
+        """
+        raise NotImplementedError
+
+    # --- fitting ---
+    def fit(
+        self,
+        *,
+        x: Any,
+        y: Any,
+        backend: Literal["scipy.curve_fit", "scipy.minimize", "ultranest"] = "scipy.curve_fit",
+        data_format: Optional[str] = None,
+        parallel: Optional[Literal[None, "auto"]] = None,
+        return_run: bool = False,
+        backend_options: Optional[Dict[str, Any]] = None,
+        rng: Optional[np.random.Generator] = None,
+    ) -> Union[Results, Run]:
+        """Fit the model.
+
+        Data inference rules (v1)
+        -------------------------
+        Unless data_format is specified, y is interpreted as Gaussian:
+
+        - y.shape == (...):                 y is observed values (unweighted)
+        - y is a tuple/list of length 2:    (y, yerr) symmetric absolute errors
+        - y is a tuple/list of length 3:    (y, yerr_low, yerr_high) asymmetric absolute errors
+
+        If you want a different meaning for length-1/2/3, you MUST set data_format.
+
+        Absolute measurement errors (v1)
+        --------------------------------
+        If yerr is provided, it is ALWAYS treated as absolute measurement error.
+        (Equivalent to always using absolute_sigma=True where applicable.)
+
+        Batch semantics (v1)
+        --------------------
+        - If y is an array with shape (B, N) and x is (N,), we treat as B independent fits.
+        - If x differs per dataset, x and y may be provided as lists of datasets.
+
+        return_run
+        ----------
+        - If False: returns Results
+        - If True:  returns Run
+
+        backend_options
+        ---------------
+        Backend-specific knobs.
+
+        SciPy curve_fit:
+            - absolute_sigma is implied True when yerr is provided
+            - bounds pulled from Model.bound
+            - p0 constructed from guesses/autoguess/custom guessers
+
+        SciPy minimize:
+            - uses negative log-likelihood for selected data_format
+
+        UltraNest:
+            - requires priors OR bounds for all free params
+            - bounds imply uniform priors
+        """
+        raise NotImplementedError
+
+
+# -----------------------------------------------------------------------------
+# Convenience module: sensible_fitting.models (prebuilt models)
+# -----------------------------------------------------------------------------
+
+
+class models:
+    """Namespace for prebuilt models.
+
+    v1 includes only a small set of high-utility models with sensible defaults.
+
+    Each factory returns a Model that can still be customized with .fix/.bound/.guess/etc.
+    """
+
+    @staticmethod
+    def straight_line(*, name: str = "straight line") -> Model:
+        """Return y = m*x + b."""
+        raise NotImplementedError
+
+    @staticmethod
+    def sinusoid(*, name: str = "sinusoid") -> Model:
+        """Return offset + amplitude*sin(2π*frequency*x + phase)."""
+        raise NotImplementedError
+
+
+# =============================================================================
+# USAGE EXAMPLES (canonical)
+# =============================================================================
+
+
+def example_01_basic_line_curve_fit():
+    """Basic straight-line fit using scipy.curve_fit."""
+
+    import matplotlib.pyplot as plt
+
+    # 1) define model from plain function signature (params inferred from args)
+    def line(x, m, b):
+        return m * x + b
+
+    model = Model.from_function(line, name="straight line")
+
+    # 2) make fake data
+    rng = np.random.default_rng(0)
+    x = np.linspace(0, 10, 50)
+    y_true = line(x, 2.0, -1.0)
+    sigma = 0.6
+    y = y_true + rng.normal(0, sigma, size=x.size)
+
+    # 3) fit: tuple-length inference => Gaussian likelihood with absolute errors
+    run = model.fit(
+        x=x,
+        y=(y, sigma),
+        backend="scipy.curve_fit",
+        return_run=True,
+        # v1: always absolute measurement errors; backend_options can be omitted.
+        # backend_options={"absolute_sigma": True},
+    ).squeeze()
+
+    res = run.results
+
+    # 4) pythonic param access
+    m = res.params["m"]
+    b = res.params["b"]
+    print(m.value, "±", m.error)
+    print(b.value, "±", b.error)
+
+    # mapping-style also works
+    assert m.value == res.params["m"]["value"]
+
+    print(res.summary(digits=4))
+
+    # 5) plot data + fit line + band
+    fig, ax = plt.subplots()
+
+    ax.errorbar(x, y, yerr=sigma, fmt="o", ms=4, capsize=2, label="data")
+
+    xg = np.linspace(x.min(), x.max(), 400)
+    yg = run.model.eval(xg, params=res.params)
+    ax.plot(xg, yg, label="fit")
+
+    # level=2 => central quantiles ~ (0.02275, 0.97725)
+    band = run.band(xg, nsamples=400, level=2, method="auto")
+    ax.fill_between(xg, band.low, band.high, alpha=0.2, label="~2σ")
+
+    ax.legend()
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    plt.show()
+
+
+def example_02_prebuilt_line_model():
+    """Prebuilt model with bounds."""
+
+    import matplotlib.pyplot as plt
+
+    model = models.straight_line().bound(m=(-10, 10))
+
+    rng = np.random.default_rng(1)
+    x = np.linspace(-2, 2, 60)
+    sigma = 0.15
+    y = 0.7 * x + 0.2 + rng.normal(0, sigma, size=x.size)
+
+    run = model.fit(x=x, y=(y, sigma), backend="scipy.curve_fit", return_run=True).squeeze()
+    res = run.results
+
+    print(res.summary(digits=6))
+
+    fig, ax = plt.subplots()
+    ax.errorbar(x, y, yerr=sigma, fmt=".", label="data")
+
+    xg = np.linspace(x.min(), x.max(), 400)
+    ax.plot(xg, run.model.eval(xg, params=res.params), label="fit")
+
+    band = run.band(xg, nsamples=500, level=2)
+    ax.fill_between(xg, band.low, band.high, alpha=0.2, label="~2σ")
+
+    ax.legend()
+    plt.show()
+
+
+def example_03_sinusoid_with_guessers_and_fixes():
+    """Sinusoid with fixed params, bounds, manual + auto guesses, and custom guesser."""
+
+    import matplotlib.pyplot as plt
+
+    base = models.sinusoid(name="sinusoid")
+
+    model = (
+        base
+        .fix(offset=0.0, phase=np.pi / 3)
+        .bound(amplitude=(0.2, 5.0), frequency=(1.0, 10.0))
+        .guess(frequency=3.1)
+        .autoguess("amplitude")
+    )
+
+    @model.guesser
+    def smart_init(x, y, g):
+        # Keep user guess if provided; otherwise infer.
+        if g.is_unset("frequency"):
+            # v1 may implement a simple frequency estimate; lomb-scargle is optional.
+            g.frequency = 3.0
+
+        # robust-ish amplitude estimate
+        g.amplitude = np.quantile(y, 0.95) - np.quantile(y, 0.05)
+
+    # Fake data
+    rng = np.random.default_rng(7)
+    x = np.linspace(0, 1, 200)
+    sigma = 0.15
+    y = model.eval(x, amplitude=1.8, frequency=3.3) + rng.normal(0, sigma, size=x.size)
+
+    run = model.fit(x=x, y=(y, sigma), backend="scipy.curve_fit", return_run=True).squeeze()
+    res = run.results
+
+    print(res.summary(digits=5))
+
+    fig, ax = plt.subplots()
+    ax.errorbar(x, y, yerr=sigma, fmt=".", label="data")
+
+    xg = np.linspace(x.min(), x.max(), 400)
+    ax.plot(xg, run.model.eval(xg, params=res.params), label="fit")
+
+    band = run.band(xg, nsamples=600, level=2)
+    ax.fill_between(xg, band.low, band.high, alpha=0.2, label="~2σ")
+
+    ax.legend()
+    plt.show()
+
+
+def example_04_batch_fit_common_x():
+    """Batch fit with common x across datasets."""
+
+    import matplotlib.pyplot as plt
+
+    model = (
+        models.sinusoid(name="wave")
+        .fix(offset=0.0, phase=np.pi / 3)
+        .bound(amplitude=(0.2, 5.0), frequency=(1.0, 6.0))
+        .guess(frequency=2.8)
+        .autoguess("amplitude")
+    )
+
+    # make 4 datasets
+    rng = np.random.default_rng(2)
+    N_SYSTEMS, N = 4, 250
+    x = np.linspace(0, 1, N)
+
+    A0, F0 = 2.0, 3.0
+    A = A0 * (1 + 0.05 * rng.normal(size=N_SYSTEMS))
+    F = F0 * (1 + 0.02 * rng.normal(size=N_SYSTEMS))
+
+    sigma = 0.2
+    y_clean = np.stack([model.eval(x, amplitude=A[i], frequency=F[i]) for i in range(N_SYSTEMS)])
+    y = y_clean + rng.normal(0, sigma, size=y_clean.shape)
+
+    # Batch fit: y has shape (systems, N); sigma scalar broadcasts
+    run = model.fit(
+        x=x,
+        y=(y, sigma),
+        backend="scipy.curve_fit",
+        parallel="auto",
+        return_run=True,
+    )
+
+    res = run.results
+    print(res.summary(digits=4))
+
+    # slicing semantics
+    print(res[0:2].params["frequency"].value)  # (2,)
+
+    # plot on grid
+    fig, axs = plt.subplots(2, 2, figsize=(10, 7), sharex=True, sharey=True)
+    axs = np.ravel(axs)
+
+    xg = np.linspace(x.min(), x.max(), 500)
+
+    for i, ax in enumerate(axs):
+        ax.errorbar(x, y[i], yerr=sigma, fmt=".", ms=3, label=f"data {i}")
+
+        yi = run.model.eval(xg, params=res[i].params)
+        ax.plot(xg, yi, label="fit")
+
+        band = run[i].band(xg, nsamples=300, level=2)
+        ax.fill_between(xg, band.low, band.high, alpha=0.2)
+
+        ax.set_title(f"system {i}")
+        ax.legend()
+
+    plt.show()
+
+
+def example_05_batch_fit_ragged_x():
+    """Batch fit where each dataset has its own x grid.
+
+    Spec: if x differs, user passes lists of datasets.
+    """
+
+    model = models.straight_line()
+
+    rng = np.random.default_rng(123)
+
+    xs: List[Array] = []
+    ys: List[Tuple[Array, Array]] = []
+
+    for i in range(3):
+        n = 30 + 10 * i
+        x = np.sort(rng.uniform(-2, 2, size=n))
+        sigma = 0.1 + 0.05 * rng.random(size=n)
+        y = 0.5 * x - 0.1 + rng.normal(0, sigma)
+
+        xs.append(x)
+        ys.append((y, sigma))
+
+    run = model.fit(
+        x=xs,
+        y=ys,
+        backend="scipy.curve_fit",
+        parallel="auto",
+        return_run=True,
+    )
+
+    res = run.results
+    print(res.summary(digits=4))
+
+
+def example_06_backend_swap_quick_vs_ultranest():
+    """Same model, same data, two backends.
+
+    v1 intent:
+    - quick: scipy.curve_fit
+    - full posterior: ultranest (requires bounds/priors)
+    """
+
+    import matplotlib.pyplot as plt
+
+    def line(x, m, b):
+        return m * x + b
+
+    model = Model.from_function(line).bound(m=(-10, 10), b=(-10, 10))
+
+    rng = np.random.default_rng(5)
+    x = np.linspace(0, 4, 50)
+    sigma = 0.3
+    y = line(x, 1.7, -0.4) + rng.normal(0, sigma, size=x.size)
+
+    run_cf = model.fit(x=x, y=(y, sigma), backend="scipy.curve_fit", return_run=True).squeeze()
+
+    # Bayesian backend requires priors OR bounds for all free params.
+    run_ns = model.fit(x=x, y=(y, sigma), backend="ultranest", return_run=True).squeeze()
+
+    fig, ax = plt.subplots()
+    ax.errorbar(x, y, yerr=sigma, fmt=".", label="data")
+
+    xg = np.linspace(x.min(), x.max(), 400)
+
+    y_cf = run_cf.model.eval(xg, params=run_cf.results.params)
+    ax.plot(xg, y_cf, label="curve_fit")
+
+    y_ns = run_ns.model.eval(xg, params=run_ns.results.params)
+    ax.plot(xg, y_ns, label="ultranest MAP/median")
+
+    band_cf = run_cf.band(xg, level=2, method="covariance")
+    ax.fill_between(xg, band_cf.low, band_cf.high, alpha=0.15, label="curve_fit ~2σ")
+
+    # For ultranest, method="auto" should prefer posterior
+    band_ns = run_ns.band(xg, level=2, method="auto")
+    ax.fill_between(xg, band_ns.low, band_ns.high, alpha=0.15, label="ultranest 2σ")
+
+    ax.legend()
+    plt.show()
+
+
+def example_07_derived_params_post_fit():
+    """Derived parameters computed AFTER fitting (v1).
+
+    v1: derived params do NOT affect optimization/sampling.
+    They are computed in Results after fit completes.
+    """
+
+    def gaussian(x, amp, mu, sigma):
+        return amp * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+
+    model = (
+        Model.from_function(gaussian)
+        .bound(amp=(0, None), sigma=(1e-6, None))
+        .derive(
+            "fwhm",
+            lambda p: 2.354820045 * p["sigma"],
+            doc="Full-width at half maximum",
+        )
+    )
+
+    rng = np.random.default_rng(0)
+    x = np.linspace(-3, 3, 200)
+    sigma_y = 0.05
+    y = model.eval(x, amp=1.0, mu=0.2, sigma=0.7) + rng.normal(0, sigma_y, size=x.size)
+
+    run = model.fit(x=x, y=(y, sigma_y), backend="scipy.curve_fit", return_run=True).squeeze()
+    res = run.results
+
+    print(res.params["sigma"].value, res.params["fwhm"].value)
+    assert res.params["fwhm"].derived is True
+
+
+# =============================================================================
+# Defaults & standards (v1)
+# =============================================================================
+
+"""
+1) Default likelihood / data_format
+----------------------------------
+If data_format is None:
+- y is array-like:
+    -> Gaussian, unweighted
+- y is (y, yerr):
+    -> Gaussian with symmetric absolute errors
+- y is (y, yerr_low, yerr_high):
+    -> Gaussian with asymmetric absolute errors
+
+If user wants a different meaning for y shapes 1/2/3, they MUST set data_format.
+
+2) Absolute measurement errors
+------------------------------
+Whenever yerr is provided, it is treated as absolute measurement error.
+
+If yerr is omitted:
+- fit is unweighted
+- reported parameter errors may use an estimated residual scale
+
+3) Asymmetric errors ordering
+-----------------------------
+We adopt Matplotlib convention:
+- (y, yerr_low, yerr_high)
+Where yerr_low is downward error (y - low), yerr_high is upward error (high - y).
+
+4) Parameter access
+-------------------
+- res.params["m"].value and res.params["m"]["value"] both work and match.
+- res.params["m"].error == res.params["m"]["error"]
+
+5) Band API
+-----------
+- band(level=2) means Normal-equivalent ±2σ central interval
+- band(conf_int=(qlo,qhi)) supported
+- method='auto' prefers posterior if available, else covariance
+
+6) Squeeze semantics
+--------------------
+- run.squeeze() raises unless there is exactly one fit present.
+
+7) Batch semantics
+------------------
+- x common: x shape (N,), y shape (B,N)
+- x ragged: x is list of arrays; y is list of matching payloads
+
+8) Derived parameters (v1)
+--------------------------
+- derived params computed after fit only
+- derived params depend only on fitted params
+- derived params do not influence fitting
+"""
+
+
+# =============================================================================
+# V2 considerations (reserved names / ideas)
+# =============================================================================
+
+"""V2 ideas to keep doors open (not in v1 scope)
+
+A) Parameter constraints/ties DURING fitting
+--------------------------------------------
+Competitors like lmfit allow algebraic constraints: param.expr depends on other params.
+In sensible_fitting, a v2 feature could allow:
+- model.tie(name=...) / model.expr(...) / model.constrain(...)
+- ties affect the free parameterization and thus the fit
+
+Reserved builder names (suggestion):
+- tie, expr, constrain, derive (already used for post-fit derived)
+
+B) Shared/global parameters across datasets
+-------------------------------------------
+Coupled multi-dataset fits (global + per-dataset params) could be expressed with:
+- model.share(...), model.link(...), model.per_batch(...), model.expand(...)
+
+C) Additional likelihoods
+------------------------
+- Binomial / Poisson / lognormal / Student-t
+- Full covariance Gaussian: (y, C)
+
+D) Predictive utilities
+-----------------------
+- run.predict(x, kind='mean'|'median')
+- posterior predictive sampling
+
+E) Diagnostics
+--------------
+- residual plots
+- goodness-of-fit summaries
+- corner plots (posterior)
+
+F) Multi-output models
+----------------------
+- y is dict of observables, or stacked outputs
+"""
+
+
+# === src/sensible_fitting/__init__.py ===
+
+"""sensible_fitting public API."""
+from .model import Model
+from .run import Run, Results, Band
+from . import models
+
+__all__ = ["Model", "Run", "Results", "Band", "models"]
+
+
+# === src/sensible_fitting/backends/__init__.py ===
+
+"""Backend implementations."""
+
+
+# === src/sensible_fitting/backends/scipy_curve_fit.py ===
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Optional, Tuple
+
+import numpy as np
+from scipy.optimize import curve_fit
+
+
+@dataclass(frozen=True)
+class CurveFitResult:
+    popt: np.ndarray
+    pcov: Optional[np.ndarray]
+    success: bool
+    message: str = ""
+
+
+def fit_curve_fit(
+    f_wrapped: Callable[..., Any],
+    x: Any,
+    y: np.ndarray,
+    *,
+    sigma: Optional[np.ndarray],
+    p0: np.ndarray,
+    bounds: Tuple[np.ndarray, np.ndarray],
+    maxfev: Optional[int] = None,
+) -> CurveFitResult:
+    kwargs: Dict[str, Any] = {}
+    if maxfev is not None:
+        kwargs["maxfev"] = int(maxfev)
+
+    try:
+        popt, pcov = curve_fit(
+            f_wrapped,
+            x,
+            y,
+            p0=p0,
+            sigma=sigma,
+            # v1: provided errors are absolute measurement errors
+            absolute_sigma=(sigma is not None),
+            bounds=bounds,
+            **kwargs,
+        )
+        return CurveFitResult(popt=np.asarray(popt, float), pcov=pcov, success=True, message="ok")
+    except Exception as e:
+        return CurveFitResult(popt=np.asarray(p0, float), pcov=None, success=False, message=str(e))
+
+
+# === src/sensible_fitting/model.py ===
+
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from typing import Any, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Tuple, Union
+
+import numpy as np
+
+from .backends.scipy_curve_fit import fit_curve_fit
+from .params import DerivedSpec, GuessState, ParameterSpec, ParamView, ParamsView
+from .run import Results, Run
+from .util import flatten_batch, infer_param_names, is_ragged_batch, prod, unflatten_batch
+
+
+Guesser = Callable[[Any, Any, GuessState], None]
+
+
+@dataclass
+class Model:
+    """A model wraps a callable and parameter metadata."""
+    name: str
+    func: Callable[..., Any]
+    param_names: Tuple[str, ...]
+    params: Tuple[ParameterSpec, ...]
+    guessers: Tuple[Guesser, ...] = ()
+    derived: Tuple[DerivedSpec, ...] = ()
+    autoguess_names: Tuple[str, ...] = ()
+    meta: Dict[str, Any] = None
+
+    # ---- constructor ----
+    @staticmethod
+    def from_function(func: Callable[..., Any], *, name: Optional[str] = None) -> "Model":
+        names = infer_param_names(func)
+        specs = tuple(ParameterSpec(name=n) for n in names)
+        return Model(name=name or getattr(func, "__name__", "model"), func=func, param_names=names, params=specs)
+
+    # ---- evaluation ----
+    def eval(self, x: Any, *, params: Optional[Mapping[str, Any]] = None, **kwargs) -> Any:
+        values: Dict[str, Any] = {}
+
+        if params is not None:
+            for k, v in params.items():
+                if isinstance(v, ParamView):
+                    values[k] = v.value
+                else:
+                    # If someone passes a dict-like with ["value"], allow it.
+                    try:
+                        if hasattr(v, "__getitem__"):
+                            values[k] = v["value"]  # type: ignore[index]
+                        else:
+                            values[k] = v
+                    except Exception:
+                        values[k] = v
+
+        values.update(kwargs)
+
+        # Fill fixed values if absent
+        for spec in self.params:
+            if spec.fixed and spec.name not in values:
+                values[spec.name] = spec.fixed_value
+
+        missing = [n for n in self.param_names if n not in values]
+        if missing:
+            raise TypeError(f"Missing parameter values for: {missing}")
+
+        args = [x] + [values[n] for n in self.param_names]
+        return self.func(*args)
+
+    # ---- builders (pure; return new model) ----
+    def fix(self, **fixed: float) -> "Model":
+        m = {p.name: p for p in self.params}
+        for k, v in fixed.items():
+            if k not in m:
+                raise KeyError(k)
+            m[k] = replace(m[k], fixed=True, fixed_value=float(v))
+        return replace(self, params=tuple(m[n] for n in self.param_names))
+
+    def bound(self, **bounds: Tuple[Optional[float], Optional[float]]) -> "Model":
+        m = {p.name: p for p in self.params}
+        for k, b in bounds.items():
+            if k not in m:
+                raise KeyError(k)
+            lo, hi = b
+            m[k] = replace(m[k], bounds=(lo, hi))
+        return replace(self, params=tuple(m[n] for n in self.param_names))
+
+    def guess(self, **guesses: float) -> "Model":
+        m = {p.name: p for p in self.params}
+        for k, g in guesses.items():
+            if k not in m:
+                raise KeyError(k)
+            m[k] = replace(m[k], guess=float(g))
+        return replace(self, params=tuple(m[n] for n in self.param_names))
+
+    def autoguess(self, *names: str) -> "Model":
+        for n in names:
+            if n not in self.param_names:
+                raise KeyError(n)
+        merged = tuple(dict.fromkeys(self.autoguess_names + tuple(names)).keys())
+        return replace(self, autoguess_names=merged)
+
+    def prior(self, **priors: Tuple[str, Any]) -> "Model":
+        m = {p.name: p for p in self.params}
+        for k, p in priors.items():
+            if k not in m:
+                raise KeyError(k)
+            if not isinstance(p, tuple) or len(p) < 1:
+                raise TypeError("prior must be like ('normal', 0, 1) etc.")
+            kind = str(p[0])
+            args = tuple(p[1:])
+            m[k] = replace(m[k], prior=(kind, args))
+        return replace(self, params=tuple(m[n] for n in self.param_names))
+
+    def derive(self, name: str, func: Callable[[Mapping[str, float]], float], *, doc: str = "") -> "Model":
+        if name in self.param_names:
+            raise ValueError(f"Derived name {name!r} conflicts with an existing parameter.")
+        return replace(self, derived=self.derived + (DerivedSpec(name=name, func=func, doc=doc),))
+
+    # ---- guesser registration (side-effect, v1 ergonomic) ----
+    def guesser(self, fn: Optional[Guesser] = None):
+        """Decorator to register a custom guesser.
+
+        NOTE: This mutates `self` by appending the guesser, and returns the function.
+        This supports the ergonomic pattern:
+
+            @model.guesser
+            def g(x, y, gs): ...
+
+        Builder methods remain pure (return new models).
+        """
+        def decorator(f: Guesser) -> Guesser:
+            self.guessers = self.guessers + (f,)
+            return f
+
+        return decorator(fn) if fn is not None else decorator
+
+    # ---- fitting ----
+    def fit(
+        self,
+        *,
+        x: Any,
+        y: Any,
+        backend: Literal["scipy.curve_fit", "scipy.minimize", "ultranest"] = "scipy.curve_fit",
+        data_format: Optional[str] = None,
+        parallel: Optional[Literal[None, "auto"]] = None,
+        return_run: bool = False,
+        backend_options: Optional[Dict[str, Any]] = None,
+        rng: Optional[np.random.Generator] = None,
+    ) -> Union[Results, Run]:
+        if rng is None:
+            rng = np.random.default_rng()
+        backend_options = backend_options or {}
+
+        # v1: only Gaussian inference (data_format None or 'normal')
+        if data_format not in (None, "normal"):
+            raise NotImplementedError("v1 MVP supports only Gaussian default data inference.")
+
+        datasets: List[Dict[str, Any]] = []
+        batch_shape: Tuple[int, ...] = ()
+
+        if is_ragged_batch(x, y):
+            for xi, yi in zip(x, y):
+                yobs, sigma = _infer_gaussian_payload(yi)
+                datasets.append({"x": xi, "y": yobs, "sigma": sigma})
+            batch_shape = (len(datasets),)
+        else:
+            yobs, sigma = _infer_gaussian_payload(y)
+            yobs = np.asarray(yobs)
+            if yobs.ndim == 1:
+                datasets.append({"x": x, "y": yobs, "sigma": sigma})
+                batch_shape = ()
+            else:
+                yflat, batch_shape = flatten_batch(yobs)
+                # broadcast sigma if needed
+                if sigma is None:
+                    sflat = [None] * yflat.shape[0]
+                else:
+                    sarr = np.asarray(sigma)
+                    if sarr.shape == ():
+                        sflat = [float(sarr)] * yflat.shape[0]
+                    else:
+                        sb = np.broadcast_to(sarr, yobs.shape)
+                        sb_flat, _ = flatten_batch(sb)
+                        sflat = [sb_flat[i] for i in range(sb_flat.shape[0])]
+                for i in range(yflat.shape[0]):
+                    datasets.append({"x": x, "y": yflat[i], "sigma": sflat[i]})
+
+        free_names, fixed_map = _free_and_fixed(self.params)
+
+        # allocate storage (flattened batch)
+        B = len(datasets)
+        values = {n: np.empty((B,), dtype=float) for n in self.param_names}
+        errors = {n: np.full((B,), np.nan, dtype=float) for n in self.param_names}
+        covs: List[Optional[np.ndarray]] = []
+
+        meta: Dict[str, Any] = {
+            "free_param_names": list(free_names),
+            "success": [],
+            "message": [],
+        }
+
+        for i, ds in enumerate(datasets):
+            xi = ds["x"]
+            yi = np.asarray(ds["y"])
+            si = ds["sigma"]
+            si_arr = None if si is None else np.asarray(si, dtype=float)
+
+            p0_map = _initial_guess(self, xi, yi, free_names, rng=rng)
+            p0 = np.array([float(p0_map[n]) for n in free_names], dtype=float)
+            bounds = _bounds_for_free(self.params, free_names)
+
+            if backend != "scipy.curve_fit":
+                raise NotImplementedError("v1 MVP implements only backend='scipy.curve_fit'.")
+
+            f_wrapped = _wrap_free_params(self, fixed_map, free_names)
+            r = fit_curve_fit(
+                f_wrapped, xi, yi,
+                sigma=si_arr, p0=p0, bounds=bounds,
+                maxfev=backend_options.get("maxfev"),
+            )
+            meta["success"].append(r.success)
+            meta["message"].append(r.message)
+
+            # store free values
+            for j, n in enumerate(free_names):
+                values[n][i] = r.popt[j]
+            # fixed values
+            for n, fv in fixed_map.items():
+                values[n][i] = float(fv)
+
+            if r.pcov is not None:
+                pcov = np.asarray(r.pcov, dtype=float)
+                covs.append(pcov)
+                perr = np.sqrt(np.clip(np.diag(pcov), 0.0, np.inf))
+                for j, n in enumerate(free_names):
+                    errors[n][i] = perr[j]
+            else:
+                covs.append(None)
+
+        # Build param views + cov
+        if batch_shape == ():
+            items: Dict[str, ParamView] = {}
+            for n in self.param_names:
+                spec = _spec_by_name(self.params, n)
+                v = float(values[n][0])
+                e = float(errors[n][0])
+                items[n] = ParamView(
+                    name=n,
+                    value=v,
+                    error=(None if np.isnan(e) else e),
+                    fixed=spec.fixed,
+                    bounds=spec.bounds,
+                    derived=False,
+                )
+            cov = covs[0] if covs and covs[0] is not None else None
+            results = Results(batch_shape=(), params=ParamsView(items), cov=cov, backend=backend, meta=meta)
+        else:
+            items = {}
+            for n in self.param_names:
+                spec = _spec_by_name(self.params, n)
+                v = unflatten_batch(values[n], batch_shape)
+                e = unflatten_batch(errors[n], batch_shape)
+                items[n] = ParamView(
+                    name=n,
+                    value=v,
+                    error=e,
+                    fixed=spec.fixed,
+                    bounds=spec.bounds,
+                    derived=False,
+                )
+            if all(c is not None for c in covs):
+                cov = np.stack([c for c in covs], axis=0)
+                cov = unflatten_batch(cov, batch_shape)
+            else:
+                cov = None
+            results = Results(batch_shape=batch_shape, params=ParamsView(items), cov=cov, backend=backend, meta=meta)
+
+        # Post-fit derived params (v1): depend only on fitted params
+        if self.derived:
+            if results.batch_shape == ():
+                base = {n: float(results.params[n].value) for n in self.param_names}
+                extra = {}
+                for d in self.derived:
+                    dv = float(d.func(base))
+                    extra[d.name] = ParamView(name=d.name, value=dv, error=None, fixed=True, derived=True)
+                results = replace(results, params=ParamsView({**dict(results.params.items()), **extra}))
+            else:
+                # flatten again
+                batch_size = prod(results.batch_shape)
+                flat_vals = {n: np.asarray(results.params[n].value).reshape((batch_size,)) for n in self.param_names}
+                extra_items = {}
+                for d in self.derived:
+                    out = np.empty((batch_size,), dtype=float)
+                    for i in range(batch_size):
+                        base = {n: float(flat_vals[n][i]) for n in self.param_names}
+                        out[i] = float(d.func(base))
+                    extra_items[d.name] = ParamView(
+                        name=d.name,
+                        value=unflatten_batch(out, results.batch_shape),
+                        error=None,
+                        fixed=True,
+                        derived=True,
+                    )
+                results = replace(results, params=ParamsView({**dict(results.params.items()), **extra_items}))
+
+        run = Run(
+            model=self,
+            results=results,
+            backend=backend,
+            data_format=(data_format or "normal"),
+            meta=meta,
+            data={"x": x, "y": y},
+        )
+
+        return run if return_run else results
+
+
+def _spec_by_name(params: Tuple[ParameterSpec, ...], name: str) -> ParameterSpec:
+    for p in params:
+        if p.name == name:
+            return p
+    raise KeyError(name)
+
+
+def _free_and_fixed(params: Tuple[ParameterSpec, ...]) -> Tuple[List[str], Dict[str, float]]:
+    free: List[str] = []
+    fixed: Dict[str, float] = {}
+    for p in params:
+        if p.fixed:
+            if p.fixed_value is None:
+                raise ValueError(f"Parameter {p.name} is fixed but has no fixed_value.")
+            fixed[p.name] = float(p.fixed_value)
+        else:
+            free.append(p.name)
+    return free, fixed
+
+
+def _bounds_for_free(params: Tuple[ParameterSpec, ...], free_names: List[str]) -> Tuple[np.ndarray, np.ndarray]:
+    pmap = {p.name: p for p in params}
+    lo: List[float] = []
+    hi: List[float] = []
+    for n in free_names:
+        b = pmap[n].bounds
+        if b is None:
+            lo.append(-np.inf)
+            hi.append(np.inf)
+        else:
+            lo.append(-np.inf if b[0] is None else float(b[0]))
+            hi.append(np.inf if b[1] is None else float(b[1]))
+    return (np.array(lo, dtype=float), np.array(hi, dtype=float))
+
+
+def _wrap_free_params(model: Model, fixed_map: Dict[str, float], free_names: List[str]):
+    def f(x, *theta_free):
+        kwargs = dict(fixed_map)
+        for j, n in enumerate(free_names):
+            kwargs[n] = theta_free[j]
+        return model.eval(x, **kwargs)
+    return f
+
+
+def _infer_gaussian_payload(y: Any):
+    # v1 default inference:
+    # y -> unweighted
+    # (y, yerr) -> symmetric absolute errors
+    # (y, yerr_low, yerr_high) -> asymmetric; approximate to mean sigma for curve_fit
+    if isinstance(y, (tuple, list)) and len(y) == 2:
+        yobs, yerr = y
+        return np.asarray(yobs), yerr
+    if isinstance(y, (tuple, list)) and len(y) == 3:
+        yobs, ylo, yhi = y
+        sigma = 0.5 * (np.asarray(ylo) + np.asarray(yhi))
+        return np.asarray(yobs), sigma
+    return np.asarray(y), None
+
+
+def _initial_guess(model: Model, x: Any, y: np.ndarray, free_names: List[str], rng: np.random.Generator) -> Dict[str, float]:
+    pmap = {p.name: p for p in model.params}
+    g: Dict[str, float] = {}
+
+    # manual guesses
+    for n in free_names:
+        if pmap[n].guess is not None:
+            g[n] = float(pmap[n].guess)
+
+    # built-in heuristics for autoguess names (only if unset)
+    if model.autoguess_names:
+        g2 = _builtin_autoguess(x, y, model.autoguess_names)
+        for n, v in g2.items():
+            if n in free_names and n not in g:
+                g[n] = float(v)
+
+    # user guessers
+    if model.guessers:
+        gs = GuessState()
+        for fn in model.guessers:
+            fn(x, y, gs)
+        for n, v in gs.to_dict().items():
+            if n in free_names and n not in g:
+                g[n] = float(v)
+
+    # final fill
+    for n in free_names:
+        if n not in g:
+            g[n] = 0.0
+    return g
+
+
+def _builtin_autoguess(x: Any, y: np.ndarray, names: Sequence[str]) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    y = np.asarray(y)
+
+    # If x is a container, use first entry for slope-type heuristics.
+    x0 = x[0] if isinstance(x, (tuple, list)) and len(x) > 0 else x
+    x0 = np.asarray(x0)
+
+    for n in names:
+        if n in ("b", "c", "offset", "intercept"):
+            out[n] = float(np.median(y))
+        elif n in ("m", "slope"):
+            if x0.size >= 2:
+                out[n] = float((y[-1] - y[0]) / (x0[-1] - x0[0] + 1e-12))
+            else:
+                out[n] = 0.0
+        elif n in ("amplitude", "amp", "A"):
+            out[n] = float(0.5 * (np.nanmax(y) - np.nanmin(y)))
+        elif n in ("mu", "mean", "center"):
+            out[n] = float(np.nanmean(x0))
+        elif n in ("sigma", "width"):
+            out[n] = float(0.1 * (np.nanmax(x0) - np.nanmin(x0) + 1e-12))
+        else:
+            # unknown name: no-op
+            pass
+
+    # Special case: if both m and b requested, attempt polyfit
+    if (("m" in names) or ("slope" in names)) and (("b" in names) or ("intercept" in names)):
+        if x0.ndim == 1 and x0.size == y.size:
+            try:
+                m, b = np.polyfit(x0, y, deg=1)
+                out.setdefault("m", float(m))
+                out.setdefault("b", float(b))
+                out.setdefault("slope", float(m))
+                out.setdefault("intercept", float(b))
+            except Exception:
+                pass
+
+    return out
+
+
+# === src/sensible_fitting/models.py ===
+
+from __future__ import annotations
+
+import numpy as np
+
+from .model import Model
+
+
+def straight_line(*, name: str = "straight line") -> Model:
+    def line(x, m, b):
+        return m * x + b
+    return Model.from_function(line, name=name).autoguess("m", "b")
+
+
+def sinusoid(*, name: str = "sinusoid") -> Model:
+    def s(x, amplitude, offset, frequency, phase):
+        return offset + amplitude * np.sin(2 * np.pi * frequency * x + phase)
+    return Model.from_function(s, name=name).autoguess("amplitude", "offset")
+
+
+# === src/sensible_fitting/params.py ===
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Dict, Mapping, Optional, Tuple
+
+import numpy as np
+
+
+@dataclass(frozen=True)
+class ParameterSpec:
+    name: str
+    fixed: bool = False
+    fixed_value: Optional[float] = None
+    bounds: Optional[Tuple[Optional[float], Optional[float]]] = None
+    guess: Optional[float] = None
+    # Stored for Bayesian backends (ignored by curve_fit in v1)
+    prior: Optional[Tuple[str, Tuple[Any, ...]]] = None
+    meta: Dict[str, Any] = None
+
+
+@dataclass(frozen=True)
+class DerivedSpec:
+    """Post-fit derived parameter (v1).
+
+    v1 restriction:
+    - computed only AFTER fitting
+    - depends only on fitted params, not on other derived params
+    """
+    name: str
+    func: Any  # Callable[[Mapping[str, float]], float]
+    doc: str = ""
+    meta: Dict[str, Any] = None
+
+
+@dataclass(frozen=True)
+class ParamView:
+    """A single parameter view."""
+    name: str
+    value: Any
+    error: Any = None
+    fixed: Any = False
+    bounds: Optional[Tuple[Optional[float], Optional[float]]] = None
+    derived: bool = False
+    meta: Dict[str, Any] = None
+
+    def __getitem__(self, key: str) -> Any:
+        if key == "value":
+            return self.value
+        if key in ("error", "stderr"):
+            return self.error
+        if key == "fixed":
+            return self.fixed
+        if key == "bounds":
+            return self.bounds
+        if key == "derived":
+            return self.derived
+        raise KeyError(key)
+
+
+class ParamsView(Mapping[str, ParamView]):
+    """Mapping name -> ParamView."""
+
+    def __init__(self, items: Mapping[str, ParamView]):
+        self._items = dict(items)
+
+    def __getitem__(self, key: str) -> ParamView:
+        return self._items[key]
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __len__(self):
+        return len(self._items)
+
+    def items(self):
+        return self._items.items()
+
+    def as_dict(self) -> Dict[str, Any]:
+        """Return name->value (extracting .value)."""
+        return {k: v.value for k, v in self._items.items()}
+
+
+class GuessState:
+    """Mutable guess state passed to guessers.
+
+    Supports:
+        g.amplitude = 1.0
+        g.is_unset("amplitude")
+    """
+
+    def __init__(self):
+        object.__setattr__(self, "_d", {})
+
+    def __getattr__(self, name: str) -> Any:
+        d = object.__getattribute__(self, "_d")
+        if name in d:
+            return d[name]
+        raise AttributeError(name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "_d":
+            object.__setattr__(self, name, value)
+            return
+        d = object.__getattribute__(self, "_d")
+        d[name] = value
+
+    def is_unset(self, name: str) -> bool:
+        d = object.__getattribute__(self, "_d")
+        return name not in d
+
+    def to_dict(self) -> Dict[str, Any]:
+        return dict(object.__getattribute__(self, "_d"))
+
+
+# === src/sensible_fitting/run.py ===
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Dict, Literal, Optional, Tuple
+
+import numpy as np
+
+from .params import ParamView, ParamsView
+from .util import level_to_conf_int, prod, sample_mvn
+
+
+@dataclass(frozen=True)
+class Band:
+    low: np.ndarray
+    high: np.ndarray
+    median: Optional[np.ndarray] = None
+    meta: Dict[str, Any] = None
+
+
+@dataclass(frozen=True)
+class Results:
+    batch_shape: Tuple[int, ...]
+    params: ParamsView
+    cov: Optional[np.ndarray] = None
+    backend: str = ""
+    meta: Dict[str, Any] = None
+
+    def __getitem__(self, idx) -> "Results":
+        if self.batch_shape == ():
+            raise IndexError("Scalar Results cannot be indexed; already squeezed.")
+
+        def _slice(v):
+            if v is None:
+                return None
+            a = np.asarray(v)
+            if a.shape == ():
+                return v
+            return a[idx]
+
+        new_items = {}
+        for name, pv in self.params.items():
+            new_items[name] = ParamView(
+                name=name,
+                value=_slice(pv.value),
+                error=_slice(pv.error),
+                fixed=_slice(pv.fixed) if isinstance(pv.fixed, np.ndarray) else pv.fixed,
+                bounds=pv.bounds,
+                derived=pv.derived,
+                meta=pv.meta,
+            )
+
+        cov = self.cov
+        if cov is not None and np.asarray(cov).ndim >= 3:
+            cov = np.asarray(cov)[idx]
+
+        new_batch_shape = ()
+        for pv in new_items.values():
+            a = np.asarray(pv.value)
+            if a.shape != ():
+                new_batch_shape = a.shape
+                break
+
+        return Results(
+            batch_shape=tuple(new_batch_shape),
+            params=ParamsView(new_items),
+            cov=cov,
+            backend=self.backend,
+            meta=self.meta,
+        )
+
+    def summary(self, digits: int = 4) -> str:
+        meta = self.meta or {}
+        lines = [f"Results(backend={self.backend!r}, batch_shape={self.batch_shape})"]
+
+        if self.batch_shape == ():
+            for name, pv in self.params.items():
+                v = pv.value
+                e = pv.error
+                tag = " (derived)" if pv.derived else ""
+                if e is None:
+                    lines.append(f"  {name:>12s}: {float(v):.{digits}g}{tag}")
+                else:
+                    lines.append(f"  {name:>12s}: {float(v):.{digits}g} ± {float(e):.{digits}g}{tag}")
+            return "\n".join(lines)
+
+        batch_size = prod(self.batch_shape)
+        show = min(batch_size, 10)
+        names = list(self.params.keys())
+
+        header = "idx " + " ".join([f"{n:>14s}" for n in names])
+        lines.append(header)
+        lines.append("-" * len(header))
+
+        for i in range(show):
+            row = [f"{i:>3d}"]
+            for n in names:
+                pv = self.params[n]
+                v = np.asarray(pv.value).reshape((batch_size,))[i]
+                e = pv.error
+                if e is None:
+                    row.append(f"{float(v):>14.{digits}g}")
+                else:
+                    eflat = np.asarray(e).reshape((batch_size,))[i]
+                    row.append(f"{float(v):>7.{digits}g}±{float(eflat):<6.{digits}g}")
+            lines.append(" ".join(row))
+
+        if batch_size > show:
+            lines.append(f"... ({batch_size-show} more)")
+        return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class Run:
+    model: Any  # Model
+    results: Results
+    backend: str
+    data_format: str
+    meta: Dict[str, Any] = None
+    data: Dict[str, Any] = None
+
+    def squeeze(self) -> "Run":
+        if self.results.batch_shape == ():
+            return self
+        batch_size = prod(self.results.batch_shape)
+        if batch_size != 1:
+            raise ValueError(f"run.squeeze() requires exactly one fit; got batch_size={batch_size}. Slice first.")
+        idx = tuple(0 for _ in self.results.batch_shape)
+        return self[idx]
+
+    def __getitem__(self, idx) -> "Run":
+        sub_results = self.results[idx]
+        sub_data = None
+        if self.data is not None:
+            sub_data = {}
+            for k, v in self.data.items():
+                if isinstance(v, (list, tuple)):
+                    sub_data[k] = v[idx]
+                else:
+                    sub_data[k] = v
+        return Run(
+            model=self.model,
+            results=sub_results,
+            backend=self.backend,
+            data_format=self.data_format,
+            meta=self.meta,
+            data=sub_data,
+        )
+
+    def band(
+        self,
+        x: Any,
+        *,
+        nsamples: int = 400,
+        level: Optional[float] = None,
+        conf_int: Optional[Tuple[float, float]] = None,
+        method: Literal["auto", "posterior", "covariance"] = "auto",
+        rng: Optional[np.random.Generator] = None,
+    ) -> Band:
+        if self.results.batch_shape != ():
+            raise ValueError("run.band() requires a scalar run. Slice first (e.g., run[i].band(...)).")
+
+        if rng is None:
+            rng = np.random.default_rng()
+
+        if level is None and conf_int is None:
+            level = 2.0
+        if level is not None and conf_int is not None:
+            raise ValueError("Provide only one of level= or conf_int=.")
+
+        if conf_int is None:
+            qlo, qhi = level_to_conf_int(float(level))
+        else:
+            qlo, qhi = conf_int
+
+        # v1: covariance-only (posterior reserved)
+        if method not in ("auto", "covariance"):
+            raise NotImplementedError("v1: posterior-based band() is reserved.")
+
+        cov = self.results.cov
+        if cov is None:
+            raise ValueError("No covariance available for band().")
+
+        meta = self.results.meta or {}
+        free_names = meta.get("free_param_names")
+        if not free_names:
+            raise ValueError("Results.meta['free_param_names'] missing; cannot compute band().")
+
+        mean = np.array([float(self.results.params[n].value) for n in free_names], dtype=float)
+        cov = np.asarray(cov, dtype=float)
+
+        theta = sample_mvn(mean, cov, int(nsamples), rng)  # (S,P)
+
+        preds = []
+        for s in range(theta.shape[0]):
+            p = {name: theta[s, j] for j, name in enumerate(free_names)}
+            preds.append(np.asarray(self.model.eval(x, **p)))
+        preds = np.stack(preds, axis=0)
+
+        lo = np.quantile(preds, qlo, axis=0)
+        hi = np.quantile(preds, qhi, axis=0)
+        med = np.quantile(preds, 0.5, axis=0)
+
+        return Band(low=lo, high=hi, median=med, meta={"method": "covariance", "q": (qlo, qhi)})
+
+
+# === src/sensible_fitting/util.py ===
+
+from __future__ import annotations
+
+import inspect
+import math
+from typing import Any, Callable, Tuple
+
+import numpy as np
+
+
+def normal_cdf(z: float) -> float:
+    """Standard Normal CDF Φ(z)."""
+    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+
+def level_to_conf_int(level: float) -> Tuple[float, float]:
+    """Central interval for a Normal-equivalent ±level sigma."""
+    lo = normal_cdf(-float(level))
+    hi = normal_cdf(+float(level))
+    return (lo, hi)
+
+
+def infer_param_names(func: Callable[..., Any]) -> Tuple[str, ...]:
+    """Infer parameter names from a function signature.
+
+    Conventions:
+    - first arg is independent variable container (x)
+    - remaining positional/keyword parameters are fit parameters
+
+    v1 restriction:
+    - no *args/**kwargs in model functions
+    """
+    sig = inspect.signature(func)
+    params = list(sig.parameters.values())
+
+    if len(params) < 2:
+        raise TypeError("Model function must have at least (x, p1, ...).")
+
+    bad_kinds = {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}
+    for p in params:
+        if p.kind in bad_kinds:
+            raise TypeError("v1: *args/**kwargs are not supported in model functions.")
+
+    names = [p.name for p in params[1:]]
+    if len(set(names)) != len(names):
+        raise TypeError("Duplicate parameter names in function signature.")
+    return tuple(names)
+
+
+def prod(shape: Tuple[int, ...]) -> int:
+    n = 1
+    for s in shape:
+        n *= int(s)
+    return int(n)
+
+
+def flatten_batch(arr: np.ndarray) -> Tuple[np.ndarray, Tuple[int, ...]]:
+    """Flatten batch dimensions of an array shaped batch_shape + (N,).
+
+    Returns
+    -------
+    arr_flat : ndarray, shape (B, N) where B=prod(batch_shape)
+    batch_shape : tuple
+        Empty tuple means scalar/single dataset.
+    """
+    arr = np.asarray(arr)
+    if arr.ndim == 1:
+        return arr[None, :], ()
+    batch_shape = tuple(arr.shape[:-1])
+    B = prod(batch_shape)
+    N = arr.shape[-1]
+    return arr.reshape(B, N), batch_shape
+
+
+def unflatten_batch(values: np.ndarray, batch_shape: Tuple[int, ...]) -> np.ndarray:
+    """Unflatten arrays with leading dimension B back to batch_shape."""
+    values = np.asarray(values)
+    if batch_shape == ():
+        return values.reshape(())
+    return values.reshape(batch_shape + values.shape[1:])
+
+
+def _jittered_cholesky(cov: np.ndarray, max_tries: int = 6) -> np.ndarray:
+    cov = np.asarray(cov, dtype=float)
+    cov = 0.5 * (cov + cov.T)
+    diag = np.diag(cov)
+    scale = float(np.max(diag)) if diag.size else 1.0
+    scale = 1.0 if not np.isfinite(scale) or scale <= 0 else scale
+
+    jitter = 0.0
+    for i in range(max_tries):
+        try:
+            return np.linalg.cholesky(cov + jitter * np.eye(cov.shape[0]))
+        except np.linalg.LinAlgError:
+            jitter = (10.0 ** (-(max_tries - i))) * 1e-6 * scale + (jitter * 10.0 if jitter else 0.0)
+
+    w, v = np.linalg.eigh(cov)
+    w = np.clip(w, 0.0, None)
+    return v @ np.diag(np.sqrt(w))
+
+
+def sample_mvn(mean: np.ndarray, cov: np.ndarray, nsamples: int, rng: np.random.Generator) -> np.ndarray:
+    """Sample from MVN(mean, cov) robustly. Returns shape (nsamples, P)."""
+    mean = np.asarray(mean, dtype=float)
+    cov = np.asarray(cov, dtype=float)
+    L = _jittered_cholesky(cov)
+    z = rng.normal(size=(nsamples, mean.shape[0]))
+    return mean[None, :] + z @ L.T
+
+
+def is_sequence(x: Any) -> bool:
+    return isinstance(x, (list, tuple))
+
+
+def is_ragged_batch(x: Any, y: Any) -> bool:
+    """Heuristic: x and y are sequences of equal length => ragged batch."""
+    return is_sequence(x) and is_sequence(y) and len(x) == len(y)
+
+
+def safe_float(x: Any) -> float:
+    """Convert numpy scalar / 0-d array to python float."""
+    if isinstance(x, np.ndarray) and x.shape == ():
+        return float(x.item())
+    return float(x)

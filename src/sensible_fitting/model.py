@@ -262,7 +262,7 @@ class Model:
                 items[n] = ParamView(
                     name=n,
                     value=v,
-                    error=e,
+                    error=None if spec.fixed else e,
                     fixed=spec.fixed,
                     bounds=spec.bounds,
                     derived=False,
