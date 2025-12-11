@@ -1,0 +1,387 @@
+diff --git a/src/sensible_fitting/model.py b/src/sensible_fitting/model.py
+index edb0236..d7bf105 100644
+--- a/src/sensible_fitting/model.py
++++ b/src/sensible_fitting/model.py
+@@ -1,9 +1,10 @@
+ from __future__ import annotations
+ 
+ from dataclasses import dataclass, replace
+-from typing import Any, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Tuple, Union
++from typing import Any, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Tuple, Union
+ 
+ import numpy as np
++import warnings
+ 
+ from .backends.scipy_curve_fit import fit_curve_fit
+ from .params import DerivedSpec, GuessState, ParameterSpec, ParamView, ParamsView
+@@ -13,10 +14,17 @@ from .util import flatten_batch, infer_param_names, is_ragged_batch, prod, unfl
+ 
+ Guesser = Callable[[Any, Any, GuessState], None]
+ 
++SeedEngine = Callable[
++    ["Model", Any, np.ndarray, Sequence[str], np.random.Generator, Optional[Mapping[str, Any]]],
++    Dict[str, float],
++]
++
+ 
+ @dataclass
+ class Model:
+     """A model wraps a callable and parameter metadata."""
++
+     name: str
+     func: Callable[..., Any]
+     param_names: Tuple[str, ...]
+@@ -24,6 +32,7 @@ class Model:
+     guessers: Tuple[Guesser, ...] = ()
+     derived: Tuple[DerivedSpec, ...] = ()
+     autoguess_names: Tuple[str, ...] = ()
++    seed_engine: Optional[SeedEngine] = None
+     meta: Dict[str, Any] = None
+ 
+     # ---- constructor ----
+@@ -82,6 +91,63 @@ class Model:
+     def derive(self, name: str, func: Callable[[Mapping[str, float]], float], *, doc: str = "") -> "Model":
+         if name in self.param_names:
+             raise ValueError(f"Derived name {name!r} conflicts with an existing parameter.")
+-        return replace(self, derived=self.derived + (DerivedSpec(name=name, func=func, doc=doc),))
++        return replace(self, derived=self.derived + (DerivedSpec(name=name, func=func, doc=doc),))
++
++    # ---- guess / seed engine registration (pure builders) ----
++    def with_guesser(self, fn: Guesser) -> "Model":
++        """Return a new Model with fn appended to the guesser list.
++
++        Usage
++        -----
++        def init_gaussian(x, y, g):
++            ...
++
++        model = model.with_guesser(init_gaussian)
++        """
++        return replace(self, guessers=self.guessers + (fn,))
++
++    def with_seed_engine(self, fn: SeedEngine) -> "Model":
++        """Return a new Model with a custom seed engine.
++
++        The engine signature is:
++            fn(model, x, y, free_names, rng, user_seed) -> dict[name -> float]
++
++        The default engine can be called from custom engines as:
++            _default_seed_engine(model, x, y, free_names, rng, user_seed)
++        """
++        return replace(self, seed_engine=fn)
++
++    # ---- seed helper -------------------------------------------------
++    def seed(
++        self,
++        *,
++        x: Any,
++        y: Any = None,
++        seed: Optional[Mapping[str, Any]] = None,
++        rng: Optional[np.random.Generator] = None,
++    ) -> ParamsView:
++        """Compute initial seed parameters without performing a fit.
++
++        Precedence per parameter (free params only)
++        -------------------------------------------
++        1) per-call seed={...}
++        2) model-level .guess(...)
++        3) model guessers (with_guesser)
++        4) built-in heuristics
++        5) bounds midpoint (with warning)
++
++        If any free parameter remains unset and has no finite bounds,
++        a ValueError is raised.
++        """
++        if rng is None:
++            rng = np.random.default_rng()
++
++        free_names, fixed_map = _free_and_fixed(self.params)
++
++        yobs = None
++        if y is not None:
++            yobs, _ = _infer_gaussian_payload(y)
++            yobs = np.asarray(yobs)
++
++        p0_map = _initial_guess(self, x, yobs, free_names, rng=rng, user_seed=seed)
++
++        items: Dict[str, ParamView] = {}
++        for spec in self.params:
++            if spec.name in free_names:
++                v = float(p0_map[spec.name])
++            else:
++                # fixed param: use fixed value if present, else error
++                if spec.fixed_value is None:
++                    raise ValueError(f"Parameter {spec.name!r} is not free and has no fixed value.")
++                v = float(spec.fixed_value)
++            items[spec.name] = ParamView(
++                name=spec.name,
++                value=v,
++                error=None,
++                fixed=spec.fixed,
++                bounds=spec.bounds,
++                derived=False,
++            )
++
++        return ParamsView(items)
+ 
+-    # ---- guesser registration (side-effect, v1 ergonomic) ----
+-    def guesser(self, fn: Optional[Guesser] = None):
+-        """Decorator to register a custom guesser.
+-
+-        NOTE: This mutates `self` by appending the guesser, and returns the function.
+-        This supports the ergonomic pattern:
+-
+-            @model.guesser
+-            def g(x, y, gs): ...
+-
+-        Builder methods remain pure (return new models).
+-        """
+-        def decorator(f: Guesser) -> Guesser:
+-            self.guessers = self.guessers + (f,)
+-            return f
+-
+-        return decorator(fn) if fn is not None else decorator
+-
+     # ---- fitting ----
+     def fit(
+         self,
+         *,
+         x: Any,
+         y: Any,
++        seed: Optional[Mapping[str, Any]] = None,
+         backend: Literal["scipy.curve_fit", "scipy.minimize", "ultranest"] = "scipy.curve_fit",
+         data_format: Optional[str] = None,
+         parallel: Optional[Literal[None, "auto"]] = None,
+@@ -132,7 +198,6 @@ class Model:
+             if yobs.ndim == 1:
+                 datasets.append({"x": x, "y": yobs, "sigma": sigma})
+                 batch_shape = ()
+-            else:
++            else:
+                 yflat, batch_shape = flatten_batch(yobs)
+                 # broadcast sigma if needed
+                 if sigma is None:
+@@ -166,7 +231,7 @@ class Model:
+             yi = np.asarray(ds["y"])
+             si = ds["sigma"]
+             si_arr = None if si is None else np.asarray(si, dtype=float)
+-
+-            p0_map = _initial_guess(self, xi, yi, free_names, rng=rng)
++            # per-call seed overrides all other seeding for overlapping names
++            p0_map = _initial_guess(self, xi, yi, free_names, rng=rng, user_seed=seed)
+             p0 = np.array([float(p0_map[n]) for n in free_names], dtype=float)
+             bounds = _bounds_for_free(self.params, free_names)
+@@ -319,7 +384,7 @@ def _infer_gaussian_payload(y: Any):
+         return np.asarray(yobs), sigma
+     return np.asarray(y), None
+ 
+-
+-def _initial_guess(model: Model, x: Any, y: np.ndarray, free_names: List[str], rng: np.random.Generator) -> Dict[str, float]:
++def _initial_guess(
++    model: Model,
++    x: Any,
++    y: Optional[np.ndarray],
++    free_names: List[str],
++    rng: np.random.Generator,
++    user_seed: Optional[Mapping[str, Any]] = None,
++) -> Dict[str, float]:
++    """Entry point for computing initial guesses for free parameters."""
++    engine = model.seed_engine or _default_seed_engine
++    return engine(model, x, np.asarray(y) if y is not None else None, free_names, rng, user_seed)
++
++
++def _default_seed_engine(
++    model: Model,
++    x: Any,
++    y: Optional[np.ndarray],
++    free_names: Sequence[str],
++    rng: np.random.Generator,
++    user_seed: Optional[Mapping[str, Any]] = None,
++) -> Dict[str, float]:
++    """Default seeding policy with clear precedence and strict fallbacks.
++
++    Precedence per parameter
++    ------------------------
++    1) per-call user_seed
++    2) model-level .guess(...)
++    3) model guessers (with_guesser)
++    4) built-in heuristics (_builtin_autoguess)
++    5) bounds midpoint (finite lo/hi) with a warning
++
++    If any free parameter remains unset and has no finite bounds, a ValueError is raised.
++    """
+     pmap = {p.name: p for p in model.params}
+     g: Dict[str, float] = {}
+ 
+-    # manual guesses
+-    for n in free_names:
+-        if pmap[n].guess is not None:
+-            g[n] = float(pmap[n].guess)
+-
+-    # built-in heuristics for autoguess names (only if unset)
+-    if model.autoguess_names:
+-        g2 = _builtin_autoguess(x, y, model.autoguess_names)
+-        for n, v in g2.items():
+-            if n in free_names and n not in g:
+-                g[n] = float(v)
+-
+-    # user guessers
+-    if model.guessers:
+-        gs = GuessState()
+-        for fn in model.guessers:
+-            fn(x, y, gs)
+-        for n, v in gs.to_dict().items():
+-            if n in free_names and n not in g:
+-                g[n] = float(v)
+-
+-    # final fill
+-    for n in free_names:
+-        if n not in g:
+-            g[n] = 0.0
+-    return g
++    # 1) per-call seeds override everything else
++    if user_seed is not None:
++        for n in free_names:
++            if n in user_seed:
++                g[n] = float(user_seed[n])
++
++    # 2) model-level guesses
++    for n in free_names:
++        if n in g:
++            continue
++        spec = pmap[n]
++        if spec.guess is not None:
++            g[n] = float(spec.guess)
++
++    # 3) user guessers
++    if model.guessers and y is not None:
++        gs = GuessState()
++        for fn in model.guessers:
++            fn(x, y, gs)
++        for n, v in gs.to_dict().items():
++            if n in free_names and n not in g:
++                g[n] = float(v)
++
++    # 4) built-in heuristics
++    if y is not None:
++        if model.autoguess_names:
++            names_for_heuristics = [n for n in free_names if n in model.autoguess_names]
++        else:
++            names_for_heuristics = list(free_names)
++        g2 = _builtin_autoguess(x, y, names_for_heuristics)
++        for n, v in g2.items():
++            if n in free_names and n not in g:
++                g[n] = float(v)
++
++    # 5) fallback: bounds midpoint, with a warning
++    missing = [n for n in free_names if n not in g]
++    used_bounds: List[str] = []
++    for n in list(missing):
++        spec = pmap[n]
++        if spec.bounds is None:
++            continue
++        lo, hi = spec.bounds
++        if lo is not None and hi is not None and np.isfinite(lo) and np.isfinite(hi):
++            g[n] = float(0.5 * (lo + hi))
++            used_bounds.append(n)
++
++    if used_bounds:
++        warnings.warn(
++            "Using midpoint of bounds as seed for parameters: "
++            + ", ".join(used_bounds)
++            + ". Consider setting model.guess(...) or providing seed=... explicitly.",
++            UserWarning,
++        )
++
++    # still missing? fail loudly
++    missing = [n for n in free_names if n not in g]
++    if missing:
++        raise ValueError(
++            "Unable to infer seed for parameters: "
++            + ", ".join(missing)
++            + ". Provide a seed=... argument to fit()/Model.seed(), "
++            "or set model.guess(...) / model.with_guesser(...)."
++        )
++
++    return g
+ 
+ 
+ def _builtin_autoguess(x: Any, y: np.ndarray, names: Sequence[str]) -> Dict[str, float]:
+diff --git a/src/sensible_fitting/run.py b/src/sensible_fitting/run.py
+index b9df4d7..3e7c4c1 100644
+--- a/src/sensible_fitting/run.py
++++ b/src/sensible_fitting/run.py
+@@ -144,6 +144,35 @@ class Run:
+             data=sub_data,
+         )
+ 
++    # ------------------------------------------------------------------
++    # Prediction helper
++    # ------------------------------------------------------------------
++    def predict(
++        self,
++        x: Any,
++        *,
++        which: Literal["fit", "seed"] = "fit",
++        params: Optional[ParamsView] = None,
++    ) -> Any:
++        """Evaluate the model at x using fitted, seed, or explicit params.
++
++        Usage
++        -----
++        run.predict(xg)                     # fitted params (default)
++        run.predict(xg, which="seed")       # seed params (requires .seed present)
++        run.predict(xg, params=res.params)  # explicitly supply params
++        """
++        if params is not None:
++            return self.model.eval(x, params=params)
++
++        if which == "fit":
++            return self.model.eval(x, params=self.results.params)
++
++        if which == "seed":
++            if self.results.seed is None:
++                raise ValueError("No seed parameters stored on Results; cannot predict with which='seed'.")
++            return self.model.eval(x, params=self.results.seed)
++
++        raise ValueError(f"Unknown which={which!r}; expected 'fit' or 'seed'.")
+ 
+     def band(
+         self,
+diff --git a/src/sensible_fitting/models.py b/src/sensible_fitting/models.py
+index 8d08908..3f4e4fd 100644
+--- a/src/sensible_fitting/models.py
++++ b/src/sensible_fitting/models.py
+@@ -1,17 +1,29 @@
+ from __future__ import annotations
+ 
+ import numpy as np
+ 
+ from .model import Model
+ 
+ 
++def straight_line_func(x, m, b):
++    """Module-level straight line function: y = m*x + b."""
++    return m * x + b
++
++
++def sinusoid_func(x, amplitude, offset, frequency, phase):
++    """Module-level sinusoid: offset + amplitude*sin(2π*frequency*x + phase)."""
++    return offset + amplitude * np.sin(2 * np.pi * frequency * x + phase)
++
++
+ def straight_line(*, name: str = "straight line") -> Model:
+-    def line(x, m, b):
+-        return m * x + b
+-    return Model.from_function(line, name=name).autoguess("m", "b")
++    """Return a straight-line Model with sensible default seeding."""
++    return Model.from_function(straight_line_func, name=name).autoguess("m", "b")
+ 
+ 
+ def sinusoid(*, name: str = "sinusoid") -> Model:
+-    def s(x, amplitude, offset, frequency, phase):
+-        return offset + amplitude * np.sin(2 * np.pi * frequency * x + phase)
+-    return Model.from_function(s, name=name).autoguess("amplitude", "offset")
++    """Return a sinusoid Model with sensible default seeding."""
++    return Model.from_function(sinusoid_func, name=name).autoguess("amplitude", "offset")
+

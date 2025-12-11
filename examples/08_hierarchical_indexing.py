@@ -31,7 +31,11 @@ def main() -> None:
     def line(i, a, b):
         return a + b * i
 
-    line_model = Model.from_function(line, name="linear frequency")
+    line_model = (
+        Model.from_function(line, name="linear frequency")
+        .guess(a=2.5, b=0.5)
+    )
+
 
     N_REAL = 3       # number of realisations of (a_true, b_true)
     N_SYSTEMS = 5    # number of sinusoids per realisation

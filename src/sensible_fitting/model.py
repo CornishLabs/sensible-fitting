@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Dict, List, Literal, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Literal, Mapping, Optional, Sequence, Tuple, Union
 
-import warnings
 import numpy as np
 
 from .backends.scipy_curve_fit import fit_curve_fit
@@ -12,6 +11,12 @@ from .run import Results, Run
 from .util import flatten_batch, infer_param_names, is_ragged_batch, prod, unflatten_batch
 
 Guesser = Callable[[Any, Any, GuessState], None]
+
+
+SeedEngine = Callable[
+    ["Model", Any, np.ndarray, Sequence[str], Optional[Mapping[str, float]], np.random.Generator],
+    Dict[str, float],
+]
 
 
 @dataclass
@@ -23,6 +28,7 @@ class Model:
     params: Tuple[ParameterSpec, ...]
     guessers: Tuple[Guesser, ...] = ()
     derived: Tuple[DerivedSpec, ...] = ()
+    seed_engine: Optional[SeedEngine] = None
     meta: Dict[str, Any] = None
 
     # ---- constructor ----
@@ -107,18 +113,67 @@ class Model:
             raise ValueError(f"Derived name {name!r} conflicts with an existing parameter.")
         return replace(self, derived=self.derived + (DerivedSpec(name=name, func=func, doc=doc),))
 
-    # ---- guesser registration (still side-effecty for now) ----
-    def guesser(self, fn: Optional[Guesser] = None):
-        """Decorator to register a custom guesser.
+    def with_guesser(self, fn: Guesser) -> "Model":
+        """Return a new Model with `fn` appended to the guesser list."""
+        return replace(self, guessers=self.guessers + (fn,))
 
-            @model.guesser
-            def g(x, y, gs): ...
+    def with_seed_engine(self, fn: SeedEngine) -> "Model":
+        """Return a new Model with a custom seed engine.
+
+        The engine is called as:
+            fn(model, x, y, free_names, user_seed, rng) -> dict(name -> value)
+        """
+        return replace(self, seed_engine=fn)
+
+    def guesser(self, fn: Optional[Guesser] = None):
+        """Decorator helper for defining guesser functions without mutating the model.
+
+        Usage
+        -----
+        @model.guesser
+        def init_gaussian(x, y, g):
+            ...
+
+        model = model.with_guesser(init_gaussian)
         """
         def decorator(f: Guesser) -> Guesser:
-            self.guessers = self.guessers + (f,)
             return f
 
-        return decorator(fn) if fn is not None else decorator
+        if fn is None:
+            return decorator
+        return decorator(fn)
+
+    def seed(
+        self,
+        *,
+        x: Any,
+        y: Any,
+        seed: Optional[Mapping[str, float]] = None,
+        data_format: Optional[str] = None,
+        parallel: Optional[Literal[None, "auto"]] = None,
+        backend_options: Optional[Dict[str, Any]] = None,
+        rng: Optional[np.random.Generator] = None,
+    ) -> ParamsView:
+        """Compute parameter seeds without running the optimiser.
+
+        This is equivalent to a `fit(..., skip=True)` call, but returns the
+        seed parameter view directly.
+        """
+        run = self.fit(
+            x=x,
+            y=y,
+            backend="scipy.curve_fit",
+            data_format=data_format,
+            parallel=parallel,
+            seed=seed,
+            skip=True,
+            backend_options=backend_options,
+            rng=rng,
+        )
+        res = run.results
+        if res.seed is not None:
+            return res.seed
+        return res.params
 
     # ---- fitting ----
     def fit(
@@ -129,6 +184,7 @@ class Model:
         backend: Literal["scipy.curve_fit", "scipy.minimize", "ultranest"] = "scipy.curve_fit",
         data_format: Optional[str] = None,
         parallel: Optional[Literal[None, "auto"]] = None,
+        seed: Optional[Mapping[str, float]] = None,
         skip: bool = False,
         backend_options: Optional[Dict[str, Any]] = None,
         rng: Optional[np.random.Generator] = None,
@@ -176,7 +232,7 @@ class Model:
         # allocate storage (flattened batch)
         B = len(datasets)
         values = {n: np.empty((B,), dtype=float) for n in self.param_names}
-        stderrs = {n: np.full((B,), np.nan, dtype=float) for n in self.param_names}
+        errors = {n: np.full((B,), np.nan, dtype=float) for n in self.param_names}
         seed_values = {n: np.empty((B,), dtype=float) for n in self.param_names}
         covs: List[Optional[np.ndarray]] = []
 
@@ -193,7 +249,7 @@ class Model:
             si = ds["sigma"]
             si_arr = None if si is None else np.asarray(si, dtype=float)
 
-            p0_map = _initial_guess(self, xi, yi, free_names, rng=rng)
+            p0_map = _compute_seed_map(self, xi, yi, free_names, rng=rng, user_seed=seed)
             p0 = np.array([float(p0_map[n]) for n in free_names], dtype=float)
             bounds = _bounds_for_free(self.params, free_names)
 
@@ -218,8 +274,12 @@ class Model:
 
             f_wrapped = _wrap_free_params(self, fixed_map, free_names)
             r = fit_curve_fit(
-                f_wrapped, xi, yi,
-                sigma=si_arr, p0=p0, bounds=bounds,
+                f_wrapped,
+                xi,
+                yi,
+                sigma=si_arr,
+                p0=p0,
+                bounds=bounds,
                 maxfev=backend_options.get("maxfev"),
             )
             meta["success"].append(r.success)
@@ -237,7 +297,7 @@ class Model:
                 covs.append(pcov)
                 perr = np.sqrt(np.clip(np.diag(pcov), 0.0, np.inf))
                 for j, n in enumerate(free_names):
-                    stderrs[n][i] = perr[j]
+                    errors[n][i] = perr[j]
             else:
                 covs.append(None)
 
@@ -250,7 +310,7 @@ class Model:
             for n in self.param_names:
                 spec = _spec_by_name(self.params, n)
                 v = float(values[n][0])
-                e = float(stderrs[n][0])
+                e = float(errors[n][0])
                 sv = float(seed_values[n][0])
                 items[n] = ParamView(
                     name=n,
@@ -269,14 +329,21 @@ class Model:
                     derived=False,
                 )
             cov = covs[0] if covs and covs[0] is not None else None
-            results = Results(batch_shape=(), params=ParamsView(items), seed=ParamsView(seed_items), cov=cov, backend=backend, meta=meta)
+            results = Results(
+                batch_shape=(),
+                params=ParamsView(items),
+                seed=ParamsView(seed_items),
+                cov=cov,
+                backend=backend,
+                meta=meta,
+            )
         else:
-            items: Dict[str, ParamView] = {}
-            seed_items: Dict[str, ParamView] = {}
+            items = {}
+            seed_items = {}
             for n in self.param_names:
                 spec = _spec_by_name(self.params, n)
                 v = unflatten_batch(values[n], batch_shape)
-                e = unflatten_batch(stderrs[n], batch_shape)
+                e = unflatten_batch(errors[n], batch_shape)
                 sv = unflatten_batch(seed_values[n], batch_shape)
                 items[n] = ParamView(
                     name=n,
@@ -295,34 +362,36 @@ class Model:
                     derived=False,
                 )
 
-            if all(c is not None for c in covs) and covs:
-                cov_stack = np.stack([c for c in covs], axis=0)
-                cov = unflatten_batch(cov_stack, batch_shape)
+            if all(c is not None for c in covs):
+                cov = np.stack([c for c in covs], axis=0)
+                cov = unflatten_batch(cov, batch_shape)
             else:
                 cov = None
-            results = Results(batch_shape=batch_shape, params=ParamsView(items), seed=ParamsView(seed_items), cov=cov, backend=backend, meta=meta)
+            results = Results(
+                batch_shape=batch_shape,
+                params=ParamsView(items),
+                seed=ParamsView(seed_items),
+                cov=cov,
+                backend=backend,
+                meta=meta,
+            )
 
         # Post-fit derived params (v1): depend only on fitted params
         if self.derived:
             if results.batch_shape == ():
                 base = {n: float(results.params[n].value) for n in self.param_names}
-                extra: Dict[str, ParamView] = {}
+                extra = {}
                 for d in self.derived:
                     dv = float(d.func(base))
-                    extra[d.name] = ParamView(
-                        name=d.name,
-                        value=dv,
-                        stderr=None,
-                        fixed=True,
-                        bounds=None,
-                        derived=True,
-                    )
+                    extra[d.name] = ParamView(name=d.name, value=dv, stderr=None, fixed=True, derived=True)
                 results = replace(results, params=ParamsView({**dict(results.params.items()), **extra}))
             else:
                 # flatten again
                 batch_size = prod(results.batch_shape)
-                flat_vals = {n: np.asarray(results.params[n].value).reshape((batch_size,)) for n in self.param_names}
-                extra_items: Dict[str, ParamView] = {}
+                flat_vals = {
+                    n: np.asarray(results.params[n].value).reshape((batch_size,)) for n in self.param_names
+                }
+                extra_items = {}
                 for d in self.derived:
                     out = np.empty((batch_size,), dtype=float)
                     for i in range(batch_size):
@@ -333,7 +402,6 @@ class Model:
                         value=unflatten_batch(out, results.batch_shape),
                         stderr=None,
                         fixed=True,
-                        bounds=None,
                         derived=True,
                     )
                 results = replace(results, params=ParamsView({**dict(results.params.items()), **extra_items}))
@@ -391,6 +459,7 @@ def _wrap_free_params(model: Model, fixed_map: Dict[str, float], free_names: Lis
         for j, n in enumerate(free_names):
             kwargs[n] = theta_free[j]
         return model.eval(x, **kwargs)
+
     return f
 
 
@@ -409,103 +478,112 @@ def _infer_gaussian_payload(y: Any):
     return np.asarray(y), None
 
 
-def _initial_guess(model: Model, x: Any, y: np.ndarray, free_names: List[str], rng: np.random.Generator) -> Dict[str, float]:
-    """Construct initial guesses for free parameters.
+def _default_seed_engine(
+    model: Model,
+    x: Any,
+    y: np.ndarray,
+    free_names: Sequence[str],
+    rng: np.random.Generator,
+) -> Dict[str, float]:
+    """Built-in seeding strategy.
 
-    Priority per parameter:
-        1) Manual seed via Model.guess(...)
-        2) User guessers (model.guessers)
-        3) Built-in heuristic for known names (m, b, amplitude, offset, ...)
-        4) Midpoint of bounds if both finite (with a warning)
-        5) Otherwise: error (user must provide a seed)
+    Order (before per-call seed overlay):
+    1) model-level .guess(...)
+    2) user guessers
     """
     pmap = {p.name: p for p in model.params}
-    g: Dict[str, float] = {}
+    seeds: Dict[str, float] = {}
 
-    # 1) Manual guesses
+    # explicit model guesses
     for n in free_names:
         spec = pmap[n]
         if spec.guess is not None:
-            g[n] = float(spec.guess)
+            seeds[n] = float(spec.guess)
 
-    # 2) User guessers (do not override manual seeds)
+    # user guessers
     if model.guessers:
         gs = GuessState()
         for fn in model.guessers:
             fn(x, y, gs)
         for n, v in gs.to_dict().items():
-            if n in free_names and n not in g:
-                g[n] = float(v)
+            if n in free_names and n not in seeds:
+                seeds[n] = float(v)
 
-    # 3) Built-in heuristics for known names (do not override)
-    g2 = _builtin_autoguess(x, y, free_names)
-    for n, v in g2.items():
-        if n in free_names and n not in g:
-            g[n] = float(v)
+    return seeds
 
-    # 4) Bounds-midpoint fallback
-    missing = [n for n in free_names if n not in g]
-    for n in missing:
+
+def _compute_seed_map(
+    model: Model,
+    x: Any,
+    y: np.ndarray,
+    free_names: List[str],
+    rng: np.random.Generator,
+    user_seed: Optional[Mapping[str, float]] = None,
+) -> Dict[str, float]:
+    """Compute initial seeds for the given dataset.
+
+    Precedence per free parameter:
+
+      1) per-call `user_seed` (fit(..., seed=...))
+      2) ParameterSpec.guess via model.guess(...)
+      3) model guessers (functions registered with with_guesser)
+      4) midpoint of finite bounds (with a warning)
+      5) else: raise ValueError
+    """
+    from warnings import warn
+
+    free_names = list(free_names)
+    pmap = {p.name: p for p in model.params}
+
+    # 1+2+3 via seed engine (or default)
+    if model.seed_engine is not None:
+        # custom engine can take user_seed + rng if it wants
+        seeds = dict(model.seed_engine(model, x, y, free_names, user_seed, rng))
+    else:
+        seeds = _default_seed_engine(model, x, y, free_names, rng)
+
+    # keep only known free names
+    seeds = {n: float(v) for n, v in seeds.items() if n in free_names}
+
+    # 1) overlay per-call seed (highest precedence)
+    if user_seed is not None:
+        for n, v in user_seed.items():
+            if n in free_names:
+                seeds[n] = float(v)
+
+    # 4) fill missing from bounds midpoint if possible
+    filled_from_bounds: List[str] = []
+    for n in free_names:
+        if n in seeds:
+            continue
         spec = pmap[n]
         b = spec.bounds
         if b is not None:
             lo, hi = b
-            if lo is not None and hi is not None and np.isfinite(lo) and np.isfinite(hi):
-                mid = float(0.5 * (lo + hi))
-                warnings.warn(
-                    f"Parameter {n!r} had no seed; using midpoint of bounds {b} as initial guess.",
-                    RuntimeWarning,
-                )
-                g[n] = mid
+            if (
+                lo is not None
+                and hi is not None
+                and np.isfinite(lo)
+                and np.isfinite(hi)
+            ):
+                seeds[n] = float(0.5 * (float(lo) + float(hi)))
+                filled_from_bounds.append(n)
 
-    # 5) Final check
-    missing = [n for n in free_names if n not in g]
-    if missing:
-        raise ValueError(
-            "Could not determine initial guess for parameters: "
-            + ", ".join(repr(n) for n in missing)
-            + ". Please provide Model.guess(...) or a custom guesser."
+    if filled_from_bounds:
+        warn(
+            "Using mid-point of bounds as seed for parameters: "
+            + ", ".join(filled_from_bounds),
+            UserWarning,
         )
 
-    return g
+    # 5) final check
+    missing = [n for n in free_names if n not in seeds]
+    if missing:
+        raise ValueError(
+            "Could not determine initial seeds for parameters: "
+            + ", ".join(missing)
+            + ". Provide seed=..., model.guess(...), a guesser, or finite bounds."
+        )
 
+    return seeds
 
-def _builtin_autoguess(x: Any, y: np.ndarray, names: Sequence[str]) -> Dict[str, float]:
-    out: Dict[str, float] = {}
-    y = np.asarray(y)
-
-    # If x is a container, use first entry for slope-type heuristics.
-    x0 = x[0] if isinstance(x, (tuple, list)) and len(x) > 0 else x
-    x0 = np.asarray(x0)
-
-    for n in names:
-        if n in ("b", "c", "offset", "intercept"):
-            out[n] = float(np.median(y))
-        elif n in ("m", "slope"):
-            if x0.size >= 2:
-                out[n] = float((y[-1] - y[0]) / (x0[-1] - x0[0] + 1e-12))
-            else:
-                out[n] = 0.0
-        elif n in ("amplitude", "amp", "A"):
-            out[n] = float(0.5 * (np.nanmax(y) - np.nanmin(y)))
-        elif n in ("mu", "mean", "center"):
-            out[n] = float(np.nanmean(x0))
-        elif n in ("sigma", "width"):
-            out[n] = float(0.1 * (np.nanmax(x0) - np.nanmin(x0) + 1e-12))
-        else:
-            # unknown name: no-op
-            pass
-
-    # Special case: if both m and b requested, attempt polyfit
-    if (("m" in names) or ("slope" in names)) and (("b" in names) or ("intercept" in names)):
-        if x0.ndim == 1 and x0.size == y.size:
-            try:
-                m, b = np.polyfit(x0, y, deg=1)
-                out.setdefault("m", float(m))
-                out.setdefault("b", float(b))
-                out.setdefault("slope", float(m))
-                out.setdefault("intercept", float(b))
-            except Exception:
-                pass
-
-    return out

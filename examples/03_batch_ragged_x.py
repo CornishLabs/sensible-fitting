@@ -1,7 +1,7 @@
 import numpy as np
 from sensible_fitting import models
 
-model = models.straight_line()
+model = models.straight_line().guess(m=0.0, b=0.0)
 
 rng = np.random.default_rng(123)
 xs = []
