@@ -69,9 +69,9 @@ model = (
 )
 
 rng = np.random.default_rng(0)
-x = np.linspace(0, 10, 50)
+x = np.linspace(0, 10, 20)
 y_true = line(x, 2.0, -1.0)
-sigma = 0.6
+sigma = 1.2
 y = y_true + rng.normal(0, sigma, size=x.size)
 
 # Model.fit now always returns a Run
@@ -86,7 +86,7 @@ fig, ax = plt.subplots()
 ax.errorbar(x, y, yerr=sigma, fmt="o", ms=4, capsize=2, label="data")
 
 xg = np.linspace(x.min(), x.max(), 400)
-ax.plot(xg, run.model.eval(xg, params=res.params), label="fit")
+ax.plot(xg, run.predict(xg), label="fit")
 
 band = run.band(xg, nsamples=400, level=2)
 ax.fill_between(xg, band.low, band.high, alpha=0.2, label="~2σ band")
@@ -111,12 +111,12 @@ model = (
 )
 
 rng = np.random.default_rng(2)
-N_SYSTEMS, N = 4, 250
+N_SYSTEMS, N = 4, 25
 x = np.linspace(0, 1, N)
 
 A0, F0 = 2.0, 3.0
-A = A0 * (1 + 0.05 * rng.normal(size=N_SYSTEMS))
-F = F0 * (1 + 0.02 * rng.normal(size=N_SYSTEMS))
+A = A0 * (1 + 0.08 * rng.normal(size=N_SYSTEMS))
+F = F0 * (1 + 0.1 * rng.normal(size=N_SYSTEMS))
 
 sigma = 0.2
 y_clean = np.stack([model.eval(x, amplitude=A[i], frequency=F[i]) for i in range(N_SYSTEMS)])
@@ -213,7 +213,7 @@ def gaussian(x, amp, mu, sigma):
 model = (
     Model.from_function(gaussian)
     .bound(amp=(0, None), sigma=(1e-6, None))
-    .guess(mu=0.0, amp=1.0)  # or whatever you like as typical
+    .guess(mu=0.0, amp=1.0, sigma=1)  # or whatever you like as typical
     .derive("fwhm", lambda p: 2.354820045 * p["sigma"], doc="Full-width at half maximum")
 )
 
@@ -236,7 +236,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sensible_fitting import models
 
-fit_data = True  # True => fit. False => plot seed only.
+fit_data = False  # True => fit. False => plot seed only.
 
 model = (
     models.sinusoid(name="wave")
@@ -296,10 +296,11 @@ def main() -> None:
     # Batched sinusoid fit: 4 independent datasets sharing the same x grid
     model = (
         models.sinusoid(name="wave")
-        .fix(offset=0.0)
+        .fix(offset=0.0, phase=0.0)
         .bound(amplitude=(0.2, 5.0), frequency=(1.0, 6.0))
         .guess(frequency=3.0)
     )
+
 
     rng = np.random.default_rng(0)
     N_SYSTEMS, N = 4, 200
