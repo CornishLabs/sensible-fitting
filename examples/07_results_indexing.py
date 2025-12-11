@@ -9,10 +9,11 @@ def main() -> None:
     # Batched sinusoid fit: 4 independent datasets sharing the same x grid
     model = (
         models.sinusoid(name="wave")
-        .fix(offset=0.0)
+        .fix(offset=0.0, phase=0.0)
         .bound(amplitude=(0.2, 5.0), frequency=(1.0, 6.0))
         .guess(frequency=3.0)
     )
+
 
     rng = np.random.default_rng(0)
     N_SYSTEMS, N = 4, 200

@@ -9,7 +9,7 @@ def gaussian(x, amp, mu, sigma):
 model = (
     Model.from_function(gaussian)
     .bound(amp=(0, None), sigma=(1e-6, None))
-    .guess(mu=0.0, amp=1.0)  # or whatever you like as typical
+    .guess(mu=0.0, amp=1.0, sigma=1)  # or whatever you like as typical
     .derive("fwhm", lambda p: 2.354820045 * p["sigma"], doc="Full-width at half maximum")
 )
 

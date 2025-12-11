@@ -13,9 +13,9 @@ model = (
 )
 
 rng = np.random.default_rng(0)
-x = np.linspace(0, 10, 50)
+x = np.linspace(0, 10, 20)
 y_true = line(x, 2.0, -1.0)
-sigma = 0.6
+sigma = 1.2
 y = y_true + rng.normal(0, sigma, size=x.size)
 
 # Model.fit now always returns a Run

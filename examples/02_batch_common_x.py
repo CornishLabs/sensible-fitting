@@ -10,12 +10,12 @@ model = (
 )
 
 rng = np.random.default_rng(2)
-N_SYSTEMS, N = 4, 250
+N_SYSTEMS, N = 4, 25
 x = np.linspace(0, 1, N)
 
 A0, F0 = 2.0, 3.0
-A = A0 * (1 + 0.05 * rng.normal(size=N_SYSTEMS))
-F = F0 * (1 + 0.02 * rng.normal(size=N_SYSTEMS))
+A = A0 * (1 + 0.08 * rng.normal(size=N_SYSTEMS))
+F = F0 * (1 + 0.1 * rng.normal(size=N_SYSTEMS))
 
 sigma = 0.2
 y_clean = np.stack([model.eval(x, amplitude=A[i], frequency=F[i]) for i in range(N_SYSTEMS)])

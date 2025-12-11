@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sensible_fitting import models
 
-fit_data = True  # True => fit. False => plot seed only.
+fit_data = False  # True => fit. False => plot seed only.
 
 model = (
     models.sinusoid(name="wave")
