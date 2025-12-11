@@ -30,7 +30,7 @@ fig, ax = plt.subplots()
 ax.errorbar(x, y, yerr=sigma, fmt="o", ms=4, capsize=2, label="data")
 
 xg = np.linspace(x.min(), x.max(), 400)
-ax.plot(xg, run.model.eval(xg, params=res.params), label="fit")
+ax.plot(xg, run.predict(xg), label="fit")
 
 band = run.band(xg, nsamples=400, level=2)
 ax.fill_between(xg, band.low, band.high, alpha=0.2, label="~2σ band")
