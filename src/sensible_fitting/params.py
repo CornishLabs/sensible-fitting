@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
+
+try:
+    from uncertainties import unumpy as unp
+except Exception:  # pragma: no cover - optional at import time
+    unp = None
+
+
+__all__ = ["ParameterSpec", "DerivedSpec", "ParamView", "ParamsView", "MultiParamView", "GuessState"]
 
 
 @dataclass(frozen=True)
@@ -37,17 +45,31 @@ class ParamView:
     """A single parameter view."""
     name: str
     value: Any
-    error: Any = None
+    stderr: Any = None
     fixed: Any = False
     bounds: Optional[Tuple[Optional[float], Optional[float]]] = None
     derived: bool = False
     meta: Dict[str, Any] = None
 
+    # Backwards-compatible alias
+    @property
+    def error(self) -> Any:  # type: ignore[override]
+        return self.stderr
+
+    @property
+    def u(self):
+        """Return an uncertainties uarray/ufloat if stderr is available."""
+        if self.stderr is None:
+            raise ValueError(f"No stderr available for parameter {self.name!r}.")
+        if unp is None:
+            raise RuntimeError("uncertainties package is not available.")
+        return unp.uarray(self.value, self.stderr)
+
     def __getitem__(self, key: str) -> Any:
         if key == "value":
             return self.value
         if key in ("error", "stderr"):
-            return self.error
+            return self.stderr
         if key == "fixed":
             return self.fixed
         if key == "bounds":
@@ -57,14 +79,59 @@ class ParamView:
         raise KeyError(key)
 
 
+@dataclass(frozen=True)
+class MultiParamView:
+    """View over multiple parameters at once.
+
+    value and stderr have shape batch_shape + (len(names),).
+    """
+    names: Tuple[str, ...]
+    value: Any
+    stderr: Any = None
+    meta: Dict[str, Any] = None
+
+    @property
+    def u(self):
+        if self.stderr is None:
+            raise ValueError("No stderr available for MultiParamView.u.")
+        if unp is None:
+            raise RuntimeError("uncertainties package is not available.")
+        return unp.uarray(self.value, self.stderr)
+
+
 class ParamsView(Mapping[str, ParamView]):
-    """Mapping name -> ParamView."""
+    """Mapping name -> ParamView, with rich indexing."""
 
     def __init__(self, items: Mapping[str, ParamView]):
         self._items = dict(items)
+        self._names = tuple(self._items.keys())
 
-    def __getitem__(self, key: str) -> ParamView:
-        return self._items[key]
+    def __getitem__(self, key):  # type: ignore[override]
+        # Param by name
+        if isinstance(key, str):
+            return self._items[key]
+
+        # Multi-param by names: ("frequency", "phase") or ["frequency", "phase"]
+        if isinstance(key, (tuple, list)) and key and all(isinstance(k, str) for k in key):
+            names = tuple(key)
+            return self._multi_by_names(names)
+
+        # Param by index
+        if isinstance(key, int):
+            name = self._names[key]
+            return self._items[name]
+
+        # Slice of params -> MultiParamView
+        if isinstance(key, slice):
+            names = self._names[key]
+            return self._multi_by_names(names)
+
+        # Explicit indices -> MultiParamView
+        if isinstance(key, (tuple, list)) and key and all(isinstance(k, int) for k in key):
+            names = tuple(self._names[i] for i in key)
+            return self._multi_by_names(names)
+
+        raise KeyError(key)
 
     def __iter__(self):
         return iter(self._items)
@@ -78,6 +145,35 @@ class ParamsView(Mapping[str, ParamView]):
     def as_dict(self) -> Dict[str, Any]:
         """Return name->value (extracting .value)."""
         return {k: v.value for k, v in self._items.items()}
+
+    # ---- helpers ----
+    def _multi_by_names(self, names: Sequence[str]) -> MultiParamView:
+        names = tuple(names)
+        if not names:
+            raise ValueError("MultiParamView requires at least one parameter name.")
+
+        values = []
+        stderrs = []
+        have_err = False
+        for n in names:
+            pv = self._items[n]
+            v = np.asarray(pv.value)
+            values.append(v)
+            if pv.stderr is None:
+                stderrs.append(None)
+            else:
+                stderrs.append(np.asarray(pv.stderr))
+                have_err = True
+
+        value_arr = np.stack(values, axis=-1)
+        stderr_arr = None
+        if have_err:
+            filled = []
+            for v, e in zip(values, stderrs):
+                filled.append(np.zeros_like(v, dtype=float) if e is None else e)
+            stderr_arr = np.stack(filled, axis=-1)
+
+        return MultiParamView(names=names, value=value_arr, stderr=stderr_arr)
 
 
 class GuessState:

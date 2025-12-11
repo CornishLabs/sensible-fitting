@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Literal, Mapping, Optional, Sequence, Tuple
 
+import warnings
 import numpy as np
 
 from .backends.scipy_curve_fit import fit_curve_fit
 from .params import DerivedSpec, GuessState, ParameterSpec, ParamView, ParamsView
 from .run import Results, Run
 from .util import flatten_batch, infer_param_names, is_ragged_batch, prod, unflatten_batch
-
 
 Guesser = Callable[[Any, Any, GuessState], None]
 
@@ -23,7 +23,6 @@ class Model:
     params: Tuple[ParameterSpec, ...]
     guessers: Tuple[Guesser, ...] = ()
     derived: Tuple[DerivedSpec, ...] = ()
-    autoguess_names: Tuple[str, ...] = ()
     meta: Dict[str, Any] = None
 
     # ---- constructor ----
@@ -91,13 +90,6 @@ class Model:
             m[k] = replace(m[k], guess=float(g))
         return replace(self, params=tuple(m[n] for n in self.param_names))
 
-    def autoguess(self, *names: str) -> "Model":
-        for n in names:
-            if n not in self.param_names:
-                raise KeyError(n)
-        merged = tuple(dict.fromkeys(self.autoguess_names + tuple(names)).keys())
-        return replace(self, autoguess_names=merged)
-
     def prior(self, **priors: Tuple[str, Any]) -> "Model":
         m = {p.name: p for p in self.params}
         for k, p in priors.items():
@@ -115,17 +107,12 @@ class Model:
             raise ValueError(f"Derived name {name!r} conflicts with an existing parameter.")
         return replace(self, derived=self.derived + (DerivedSpec(name=name, func=func, doc=doc),))
 
-    # ---- guesser registration (side-effect, v1 ergonomic) ----
+    # ---- guesser registration (still side-effecty for now) ----
     def guesser(self, fn: Optional[Guesser] = None):
         """Decorator to register a custom guesser.
 
-        NOTE: This mutates `self` by appending the guesser, and returns the function.
-        This supports the ergonomic pattern:
-
             @model.guesser
             def g(x, y, gs): ...
-
-        Builder methods remain pure (return new models).
         """
         def decorator(f: Guesser) -> Guesser:
             self.guessers = self.guessers + (f,)
@@ -143,10 +130,9 @@ class Model:
         data_format: Optional[str] = None,
         parallel: Optional[Literal[None, "auto"]] = None,
         skip: bool = False,
-        return_run: bool = False,
         backend_options: Optional[Dict[str, Any]] = None,
         rng: Optional[np.random.Generator] = None,
-    ) -> Union[Results, Run]:
+    ) -> Run:
         if rng is None:
             rng = np.random.default_rng()
         backend_options = backend_options or {}
@@ -190,7 +176,7 @@ class Model:
         # allocate storage (flattened batch)
         B = len(datasets)
         values = {n: np.empty((B,), dtype=float) for n in self.param_names}
-        errors = {n: np.full((B,), np.nan, dtype=float) for n in self.param_names}
+        stderrs = {n: np.full((B,), np.nan, dtype=float) for n in self.param_names}
         seed_values = {n: np.empty((B,), dtype=float) for n in self.param_names}
         covs: List[Optional[np.ndarray]] = []
 
@@ -251,7 +237,7 @@ class Model:
                 covs.append(pcov)
                 perr = np.sqrt(np.clip(np.diag(pcov), 0.0, np.inf))
                 for j, n in enumerate(free_names):
-                    errors[n][i] = perr[j]
+                    stderrs[n][i] = perr[j]
             else:
                 covs.append(None)
 
@@ -264,12 +250,12 @@ class Model:
             for n in self.param_names:
                 spec = _spec_by_name(self.params, n)
                 v = float(values[n][0])
-                e = float(errors[n][0])
+                e = float(stderrs[n][0])
                 sv = float(seed_values[n][0])
                 items[n] = ParamView(
                     name=n,
                     value=v,
-                    error=None if (spec.fixed or not have_any_cov) else e,
+                    stderr=None if (spec.fixed or not have_any_cov) else e,
                     fixed=spec.fixed,
                     bounds=spec.bounds,
                     derived=False,
@@ -277,7 +263,7 @@ class Model:
                 seed_items[n] = ParamView(
                     name=n,
                     value=sv,
-                    error=None,
+                    stderr=None,
                     fixed=spec.fixed,
                     bounds=spec.bounds,
                     derived=False,
@@ -285,17 +271,17 @@ class Model:
             cov = covs[0] if covs and covs[0] is not None else None
             results = Results(batch_shape=(), params=ParamsView(items), seed=ParamsView(seed_items), cov=cov, backend=backend, meta=meta)
         else:
-            items = {}
-            seed_items = {}
+            items: Dict[str, ParamView] = {}
+            seed_items: Dict[str, ParamView] = {}
             for n in self.param_names:
                 spec = _spec_by_name(self.params, n)
                 v = unflatten_batch(values[n], batch_shape)
-                e = unflatten_batch(errors[n], batch_shape)
+                e = unflatten_batch(stderrs[n], batch_shape)
                 sv = unflatten_batch(seed_values[n], batch_shape)
                 items[n] = ParamView(
                     name=n,
                     value=v,
-                    error=None if (spec.fixed or not have_any_cov) else e,
+                    stderr=None if (spec.fixed or not have_any_cov) else e,
                     fixed=spec.fixed,
                     bounds=spec.bounds,
                     derived=False,
@@ -303,15 +289,15 @@ class Model:
                 seed_items[n] = ParamView(
                     name=n,
                     value=sv,
-                    error=None,
+                    stderr=None,
                     fixed=spec.fixed,
                     bounds=spec.bounds,
                     derived=False,
                 )
 
-            if all(c is not None for c in covs):
-                cov = np.stack([c for c in covs], axis=0)
-                cov = unflatten_batch(cov, batch_shape)
+            if all(c is not None for c in covs) and covs:
+                cov_stack = np.stack([c for c in covs], axis=0)
+                cov = unflatten_batch(cov_stack, batch_shape)
             else:
                 cov = None
             results = Results(batch_shape=batch_shape, params=ParamsView(items), seed=ParamsView(seed_items), cov=cov, backend=backend, meta=meta)
@@ -320,16 +306,23 @@ class Model:
         if self.derived:
             if results.batch_shape == ():
                 base = {n: float(results.params[n].value) for n in self.param_names}
-                extra = {}
+                extra: Dict[str, ParamView] = {}
                 for d in self.derived:
                     dv = float(d.func(base))
-                    extra[d.name] = ParamView(name=d.name, value=dv, error=None, fixed=True, derived=True)
+                    extra[d.name] = ParamView(
+                        name=d.name,
+                        value=dv,
+                        stderr=None,
+                        fixed=True,
+                        bounds=None,
+                        derived=True,
+                    )
                 results = replace(results, params=ParamsView({**dict(results.params.items()), **extra}))
             else:
                 # flatten again
                 batch_size = prod(results.batch_shape)
                 flat_vals = {n: np.asarray(results.params[n].value).reshape((batch_size,)) for n in self.param_names}
-                extra_items = {}
+                extra_items: Dict[str, ParamView] = {}
                 for d in self.derived:
                     out = np.empty((batch_size,), dtype=float)
                     for i in range(batch_size):
@@ -338,8 +331,9 @@ class Model:
                     extra_items[d.name] = ParamView(
                         name=d.name,
                         value=unflatten_batch(out, results.batch_shape),
-                        error=None,
+                        stderr=None,
                         fixed=True,
+                        bounds=None,
                         derived=True,
                     )
                 results = replace(results, params=ParamsView({**dict(results.params.items()), **extra_items}))
@@ -353,7 +347,7 @@ class Model:
             data={"x": x, "y": y},
         )
 
-        return run if return_run else results
+        return run
 
 
 def _spec_by_name(params: Tuple[ParameterSpec, ...], name: str) -> ParameterSpec:
@@ -416,22 +410,25 @@ def _infer_gaussian_payload(y: Any):
 
 
 def _initial_guess(model: Model, x: Any, y: np.ndarray, free_names: List[str], rng: np.random.Generator) -> Dict[str, float]:
+    """Construct initial guesses for free parameters.
+
+    Priority per parameter:
+        1) Manual seed via Model.guess(...)
+        2) User guessers (model.guessers)
+        3) Built-in heuristic for known names (m, b, amplitude, offset, ...)
+        4) Midpoint of bounds if both finite (with a warning)
+        5) Otherwise: error (user must provide a seed)
+    """
     pmap = {p.name: p for p in model.params}
     g: Dict[str, float] = {}
 
-    # manual guesses
+    # 1) Manual guesses
     for n in free_names:
-        if pmap[n].guess is not None:
-            g[n] = float(pmap[n].guess)
+        spec = pmap[n]
+        if spec.guess is not None:
+            g[n] = float(spec.guess)
 
-    # built-in heuristics for autoguess names (only if unset)
-    if model.autoguess_names:
-        g2 = _builtin_autoguess(x, y, model.autoguess_names)
-        for n, v in g2.items():
-            if n in free_names and n not in g:
-                g[n] = float(v)
-
-    # user guessers
+    # 2) User guessers (do not override manual seeds)
     if model.guessers:
         gs = GuessState()
         for fn in model.guessers:
@@ -440,10 +437,36 @@ def _initial_guess(model: Model, x: Any, y: np.ndarray, free_names: List[str], r
             if n in free_names and n not in g:
                 g[n] = float(v)
 
-    # final fill
-    for n in free_names:
-        if n not in g:
-            g[n] = 0.0
+    # 3) Built-in heuristics for known names (do not override)
+    g2 = _builtin_autoguess(x, y, free_names)
+    for n, v in g2.items():
+        if n in free_names and n not in g:
+            g[n] = float(v)
+
+    # 4) Bounds-midpoint fallback
+    missing = [n for n in free_names if n not in g]
+    for n in missing:
+        spec = pmap[n]
+        b = spec.bounds
+        if b is not None:
+            lo, hi = b
+            if lo is not None and hi is not None and np.isfinite(lo) and np.isfinite(hi):
+                mid = float(0.5 * (lo + hi))
+                warnings.warn(
+                    f"Parameter {n!r} had no seed; using midpoint of bounds {b} as initial guess.",
+                    RuntimeWarning,
+                )
+                g[n] = mid
+
+    # 5) Final check
+    missing = [n for n in free_names if n not in g]
+    if missing:
+        raise ValueError(
+            "Could not determine initial guess for parameters: "
+            + ", ".join(repr(n) for n in missing)
+            + ". Please provide Model.guess(...) or a custom guesser."
+        )
+
     return g
 
 

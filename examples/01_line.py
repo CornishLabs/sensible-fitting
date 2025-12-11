@@ -2,8 +2,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sensible_fitting import Model
 
+
 def line(x, m, b):
     return m * x + b
+
 
 model = Model.from_function(line, name="straight line")
 
@@ -13,11 +15,12 @@ y_true = line(x, 2.0, -1.0)
 sigma = 0.6
 y = y_true + rng.normal(0, sigma, size=x.size)
 
-run = model.fit(x=x, y=(y, sigma), backend="scipy.curve_fit", return_run=True).squeeze()
+# Model.fit now always returns a Run
+run = model.fit(x=x, y=(y, sigma)).squeeze()
 res = run.results
 
-print(res.params["m"].value, "±", res.params["m"].error)
-print(res.params["b"].value, "±", res.params["b"].error)
+print(res["m"].value, "±", res["m"].stderr)
+print(res["b"].value, "±", res["b"].stderr)
 print(res.summary(digits=4))
 
 fig, ax = plt.subplots()

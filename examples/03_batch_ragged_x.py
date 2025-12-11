@@ -15,5 +15,5 @@ for i in range(3):
     xs.append(x)
     ys.append((y, sigma))
 
-run = model.fit(x=xs, y=ys, backend="scipy.curve_fit", return_run=True)
+run = model.fit(x=xs, y=ys)
 print(run.results.summary(digits=4))

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Literal, Optional, Tuple
+from typing import Any, Dict, Literal, Optional, Tuple, Union
 
 import numpy as np
 
-from .params import ParamView, ParamsView
+from .params import ParamView, ParamsView, MultiParamView
 from .util import level_to_conf_int, prod, sample_mvn
 
 
@@ -26,9 +26,48 @@ class Results:
     backend: str = ""
     meta: Dict[str, Any] = None
 
-    def __getitem__(self, idx) -> "Results":
+    # ------------------------------------------------------------------
+    # Indexing
+    # ------------------------------------------------------------------
+    def __getitem__(self, key: Any) -> Union["Results", ParamView, MultiParamView]:
+        """Indexing API.
+
+        Two modes:
+        ----------
+        1) Parameter selection (by name / names):
+             res["frequency"]              -> ParamView
+             res["frequency", "phase"]     -> MultiParamView
+             res[0]["frequency"]           -> ParamView on batch-sliced results
+
+        2) Batch selection (by integer / slice) when batch_shape != ():
+             res[0]                        -> Results for first batch
+             res[0:2]                      -> Results for batches 0 and 1
+
+        For scalar Results (batch_shape == ()), integer indexing selects
+        a parameter by index:
+             res[0]                        -> first ParamView
+        """
+
+        # ---- parameter selection by name(s) ----
+        if isinstance(key, str):
+            return self.params[key]
+
+        if isinstance(key, (tuple, list)) and key and all(isinstance(k, str) for k in key):
+            # Multi-param selection by names
+            return self.params[tuple(key)]
+
+        # ---- scalar Results: allow param-index selection ----
         if self.batch_shape == ():
-            raise IndexError("Scalar Results cannot be indexed; already squeezed.")
+            if isinstance(key, int):
+                names = tuple(self.params.keys())
+                return self.params[names[key]]
+            raise IndexError(
+                "Scalar Results has no batch dimension; "
+                "use parameter names or integer parameter index."
+            )
+
+        # ---- batch selection for batched Results ----
+        idx = key
 
         def _slice(v):
             if v is None:
@@ -43,7 +82,7 @@ class Results:
             new_items[name] = ParamView(
                 name=name,
                 value=_slice(pv.value),
-                error=_slice(pv.error),
+                stderr=_slice(pv.stderr),
                 fixed=_slice(pv.fixed) if isinstance(pv.fixed, np.ndarray) else pv.fixed,
                 bounds=pv.bounds,
                 derived=pv.derived,
@@ -57,7 +96,7 @@ class Results:
                 seed_items[name] = ParamView(
                     name=name,
                     value=_slice(pv.value),
-                    error=_slice(pv.error),
+                    stderr=_slice(pv.stderr),
                     fixed=_slice(pv.fixed) if isinstance(pv.fixed, np.ndarray) else pv.fixed,
                     bounds=pv.bounds,
                     derived=pv.derived,
@@ -65,26 +104,38 @@ class Results:
                 )
             new_seed = ParamsView(seed_items)
 
-
         cov = self.cov
         if cov is not None and np.asarray(cov).ndim >= 3:
             cov = np.asarray(cov)[idx]
 
-        new_batch_shape = ()
+        new_batch_shape: Tuple[int, ...] = ()
         for pv in new_items.values():
             a = np.asarray(pv.value)
             if a.shape != ():
-                new_batch_shape = a.shape
+                new_batch_shape = tuple(a.shape)
                 break
 
         return Results(
-            batch_shape=tuple(new_batch_shape),
+            batch_shape=new_batch_shape,
             params=ParamsView(new_items),
             seed=new_seed,
             cov=cov,
             backend=self.backend,
             meta=self.meta,
         )
+
+    # ------------------------------------------------------------------
+    # Convenience views
+    # ------------------------------------------------------------------
+    @property
+    def params_fitted(self) -> ParamsView:
+        """Parameters that were part of the fit (non-derived)."""
+        return ParamsView({name: pv for name, pv in self.params.items() if not pv.derived})
+
+    @property
+    def params_derived(self) -> ParamsView:
+        """Post-fit derived parameters only."""
+        return ParamsView({name: pv for name, pv in self.params.items() if pv.derived})
 
     def summary(self, digits: int = 4) -> str:
         meta = self.meta or {}
@@ -93,7 +144,7 @@ class Results:
         if self.batch_shape == ():
             for name, pv in self.params.items():
                 v = pv.value
-                e = pv.error
+                e = pv.stderr
                 tag = " (derived)" if pv.derived else ""
                 if e is None:
                     lines.append(f"  {name:>12s}: {float(v):.{digits}g}{tag}")
@@ -114,7 +165,7 @@ class Results:
             for n in names:
                 pv = self.params[n]
                 v = np.asarray(pv.value).reshape((batch_size,))[i]
-                e = pv.error
+                e = pv.stderr
                 if e is None:
                     row.append(f"{float(v):>14.{digits}g}")
                 else:
@@ -144,6 +195,11 @@ class Run:
             raise ValueError(f"run.squeeze() requires exactly one fit; got batch_size={batch_size}. Slice first.")
         idx = tuple(0 for _ in self.results.batch_shape)
         return self[idx]
+
+    @property
+    def seed(self) -> Optional[ParamsView]:
+        """Initial seed parameters used for this run, if recorded."""
+        return self.results.seed
 
     def __getitem__(self, idx) -> "Run":
         sub_results = self.results[idx]
@@ -180,7 +236,6 @@ class Run:
             meta=self.meta,
             data=sub_data,
         )
-
 
     def band(
         self,
