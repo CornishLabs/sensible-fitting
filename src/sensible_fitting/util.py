@@ -115,9 +115,9 @@ def is_sequence(x: Any) -> bool:
     return isinstance(x, (list, tuple))
 
 
-def is_ragged_batch(x: Any, y: Any) -> bool:
-    """Heuristic: x and y are sequences of equal length => ragged batch."""
-    return is_sequence(x) and is_sequence(y) and len(x) == len(y)
+def is_ragged_batch(x: Any, data: Any) -> bool:
+    """Heuristic: x and data are sequences of equal length => ragged batch."""
+    return is_sequence(x) and is_sequence(data) and len(x) == len(data)
 
 
 def safe_float(x: Any) -> float:

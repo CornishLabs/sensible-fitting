@@ -174,7 +174,7 @@ class Model:
     def seed(
         self,
         x: Any,
-        y: Any,
+        data: Any,
         *,
         seed_override: Optional[Mapping[str, float]] = None,
         data_format: Optional[str] = None,
@@ -189,7 +189,7 @@ class Model:
         """
 
         # Pick a sensible backend label (even though optimise=False won't call it).
-        if data_format == "binomial":
+        if data_format in ("binomial", "beta"):
             seed_backend: Literal[
                 "scipy.curve_fit", "scipy.minimize", "ultranest"
             ] = "scipy.minimize"
@@ -198,7 +198,7 @@ class Model:
 
         run = self.fit(
             x,
-            y,
+            data,
             backend=seed_backend,
             data_format=data_format,
             parallel=parallel,
@@ -216,7 +216,7 @@ class Model:
     def fit(
         self,
         x: Any,
-        y: Any,
+        data: Any,
         *,
         backend: Literal[
             "scipy.curve_fit", "scipy.minimize", "ultranest"
@@ -232,36 +232,43 @@ class Model:
             rng = np.random.default_rng()
         backend_options = backend_options or {}
 
-        # v1: supported likelihoods
+        # v1: supported data formats (payload + implied objective)
         if data_format is None:
             data_format = "normal"
-        if data_format not in ("normal", "binomial"):
+        if data_format not in ("normal", "binomial", "beta"):
             raise NotImplementedError(
-                "v1 supports data_format in {'normal', 'binomial'}."
+                "v1 supports data_format in {'normal', 'binomial', 'beta'}."
             )
 
-        # If user didn't override backend and they asked for binomial, switch to minimize.
-        if data_format == "binomial" and backend == "scipy.curve_fit":
+        # If user didn't override backend and they asked for non-Gaussian, switch to minimize.
+        if data_format in ("binomial", "beta") and backend == "scipy.curve_fit":
             backend = "scipy.minimize"
 
         datasets: List[Dict[str, Any]] = []
         batch_shape: Tuple[int, ...] = ()
 
-        if is_ragged_batch(x, y):
-            for xi, yi in zip(x, y):
+        if is_ragged_batch(x, data):
+            for xi, di in zip(x, data):
                 if data_format == "normal":
-                    yobs, sigma = _infer_gaussian_payload(yi)
-                    datasets.append({"x": xi, "y": yobs, "sigma": sigma})
-                else:
-                    n, k = _infer_binomial_payload(yi)
-                    datasets.append({"x": xi, "n": n, "k": k})
+                    yobs, sigma = _infer_gaussian_payload(di)
+                    datasets.append(
+                        {"x": xi, "format": "normal", "y": yobs, "sigma": sigma}
+                    )
+                elif data_format == "binomial":
+                    n, k = _infer_binomial_payload(di)
+                    datasets.append({"x": xi, "format": "binomial", "n": n, "k": k})
+                else:  # beta
+                    a, b = _infer_beta_payload(di)
+                    datasets.append({"x": xi, "format": "beta", "alpha": a, "beta": b})
             batch_shape = (len(datasets),)
         else:
             if data_format == "normal":
-                yobs, sigma = _infer_gaussian_payload(y)
+                yobs, sigma = _infer_gaussian_payload(data)
                 yobs = np.asarray(yobs)
                 if yobs.ndim == 1:
-                    datasets.append({"x": x, "y": yobs, "sigma": sigma})
+                    datasets.append(
+                        {"x": x, "format": "normal", "y": yobs, "sigma": sigma}
+                    )
                     batch_shape = ()
                 else:
                     yflat, batch_shape = flatten_batch(yobs)
@@ -277,12 +284,19 @@ class Model:
                             sb_flat, _ = flatten_batch(sb)
                             sflat = [sb_flat[i] for i in range(sb_flat.shape[0])]
                     for i in range(yflat.shape[0]):
-                        datasets.append({"x": x, "y": yflat[i], "sigma": sflat[i]})
-            else:
-                n, k = _infer_binomial_payload(y)
+                        datasets.append(
+                            {
+                                "x": x,
+                                "format": "normal",
+                                "y": yflat[i],
+                                "sigma": sflat[i],
+                            }
+                        )
+            elif data_format == "binomial":
+                n, k = _infer_binomial_payload(data)
                 k = np.asarray(k, dtype=float)
                 if k.ndim == 1:
-                    datasets.append({"x": x, "n": n, "k": k})
+                    datasets.append({"x": x, "format": "binomial", "n": n, "k": k})
                     batch_shape = ()
                 else:
                     kflat, batch_shape = flatten_batch(k)
@@ -294,7 +308,29 @@ class Model:
                         nb_flat, _ = flatten_batch(nb)
                         nflat = [nb_flat[i] for i in range(nb_flat.shape[0])]
                     for i in range(kflat.shape[0]):
-                        datasets.append({"x": x, "n": nflat[i], "k": kflat[i]})
+                        datasets.append(
+                            {"x": x, "format": "binomial", "n": nflat[i], "k": kflat[i]}
+                        )
+            else:  # beta
+                a, b = _infer_beta_payload(data)
+                a = np.asarray(a, dtype=float)
+                b = np.asarray(b, dtype=float)
+                if a.ndim == 1:
+                    datasets.append({"x": x, "format": "beta", "alpha": a, "beta": b})
+                    batch_shape = ()
+                else:
+                    aflat, batch_shape = flatten_batch(a)
+                    bb = np.broadcast_to(b, a.shape)
+                    bflat, _ = flatten_batch(bb)
+                    for i in range(aflat.shape[0]):
+                        datasets.append(
+                            {
+                                "x": x,
+                                "format": "beta",
+                                "alpha": aflat[i],
+                                "beta": bflat[i],
+                            }
+                        )
 
         free_names, fixed_map = _free_and_fixed(self.params)
 
@@ -310,12 +346,15 @@ class Model:
 
         for i, ds in enumerate(datasets):
             xi = ds["x"]
-            if data_format == "normal":
+            fmt = ds.get("format", data_format)
+
+            # ---- "to-y" summary for seed guessers ------------------------------
+            if fmt == "normal":
                 yi = np.asarray(ds["y"])
                 si = ds["sigma"]
                 si_arr = None if si is None else np.asarray(si, dtype=float)
                 y_for_seed = yi
-            else:
+            elif fmt == "binomial":
                 n_i = np.asarray(ds["n"], dtype=float)
                 k_i = np.asarray(ds["k"], dtype=float)
                 # For binomial, guessers usually want something y-like.
@@ -323,6 +362,11 @@ class Model:
                 with np.errstate(divide="ignore", invalid="ignore"):
                     frac = np.where(n_i > 0, k_i / n_i, 0.0)
                 y_for_seed = frac
+            else:  # beta
+                a_i = np.asarray(ds["alpha"], dtype=float)
+                b_i = np.asarray(ds["beta"], dtype=float)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    y_for_seed = np.where((a_i + b_i) > 0, a_i / (a_i + b_i), 0.0)
 
             p0_map = _compute_seed_map(
                 self,
@@ -351,7 +395,7 @@ class Model:
                 covs.append(None)
                 continue
 
-            if data_format == "normal":
+            if fmt == "normal":
                 if backend != "scipy.curve_fit":
                     raise NotImplementedError(
                         "v1: normal data currently uses backend='scipy.curve_fit'."
@@ -386,7 +430,7 @@ class Model:
             else:
                 if backend != "scipy.minimize":
                     raise NotImplementedError(
-                        "v1: binomial data currently uses backend='scipy.minimize'."
+                        "v1: non-Gaussian data currently uses backend='scipy.minimize'."
                     )
 
                 def objective(theta_free: np.ndarray) -> float:
@@ -394,8 +438,12 @@ class Model:
                     for j, name in enumerate(free_names):
                         kwargs[name] = float(theta_free[j])
                     p = np.asarray(self.eval(xi, **kwargs), dtype=float)
-                    p = np.broadcast_to(p, np.asarray(k_i).shape)
-                    return _neg_loglike_binomial(p, n_i, k_i)
+                    if fmt == "binomial":
+                        p = np.broadcast_to(p, np.asarray(k_i).shape)
+                        return _neg_loglike_binomial(p, n_i, k_i)
+                    else:  # beta
+                        p = np.broadcast_to(p, np.asarray(a_i).shape)
+                        return _neg_loglike_beta(p, a_i, b_i)
 
                 r = fit_minimize(
                     objective,
@@ -538,7 +586,7 @@ class Model:
             results=results,
             backend=backend,
             data_format=data_format,
-            data={"x": x, "y": y},
+            data={"x": x, "data": data},
             success=(
                 successes[0]
                 if batch_shape == ()
@@ -642,6 +690,30 @@ def _infer_binomial_payload(y: Any):
     return n, k
 
 
+def _infer_beta_payload(data: Any):
+    """Parse beta payload data=(alpha, beta)."""
+    if not (isinstance(data, (tuple, list)) and len(data) == 2):
+        raise TypeError("beta data expects data=(alpha, beta).")
+
+    a, b = data
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+
+    # allow scalar broadcast
+    if a.shape == () and b.shape != ():
+        a = np.broadcast_to(a, b.shape)
+    if b.shape == () and a.shape != ():
+        b = np.broadcast_to(b, a.shape)
+
+    if a.shape != b.shape:
+        raise ValueError(f"alpha shape {a.shape} != beta shape {b.shape}")
+
+    if np.any(a <= 0) or np.any(b <= 0):
+        raise ValueError("Invalid beta data: require alpha > 0 and beta > 0.")
+
+    return a, b
+
+
 def _neg_loglike_binomial(p: np.ndarray, n: np.ndarray, k: np.ndarray) -> float:
     """Negative log-likelihood for Binomial(n, p) with stability clamping."""
     p = np.asarray(p, dtype=float)
@@ -655,6 +727,22 @@ def _neg_loglike_binomial(p: np.ndarray, n: np.ndarray, k: np.ndarray) -> float:
     # Keeping logC doesn't change the optimum, but is the true log_prob.
     logC = gammaln(n + 1.0) - gammaln(k + 1.0) - gammaln((n - k) + 1.0)
     ll = logC + k * np.log(p) + (n - k) * np.log(1.0 - p)
+    return float(-np.sum(ll))
+
+
+def _neg_loglike_beta(p: np.ndarray, alpha: np.ndarray, beta_: np.ndarray) -> float:
+    """Negative log-likelihood for Beta(alpha, beta) evaluated at p, with stability clamping."""
+    p = np.asarray(p, dtype=float)
+    alpha = np.asarray(alpha, dtype=float)
+    beta_ = np.asarray(beta_, dtype=float)
+
+    eps = 1e-12
+    p = np.clip(p, eps, 1.0 - eps)
+
+    # log Beta PDF: (a-1)log p + (b-1)log(1-p) - logB(a,b)
+    # logB(a,b) = gammaln(a) + gammaln(b) - gammaln(a+b)
+    log_norm = gammaln(alpha + beta_) - gammaln(alpha) - gammaln(beta_)
+    ll = (alpha - 1.0) * np.log(p) + (beta_ - 1.0) * np.log(1.0 - p) + log_norm
     return float(-np.sum(ll))
 
 

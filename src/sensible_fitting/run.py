@@ -176,7 +176,7 @@ class Run:
                 if isinstance(v, list):
                     sub_data[k] = _index_ragged_list(v, idx)
 
-                # Structured payload tuples like (y, sigma) or (y, lo, hi):
+                # Structured payload tuples like (y, sigma), (n, k), (alpha, beta), etc:
                 # slice any numpy array that carries the batch dimension.
                 elif isinstance(v, tuple):
                     parts = []
