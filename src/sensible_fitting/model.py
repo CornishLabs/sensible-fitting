@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Dict, List, Literal, Mapping, Optional, Sequence, Tuple, Union
+import inspect
+from typing import Any, Callable, Dict, List, Literal, Mapping, Optional, Sequence, Tuple
+ 
 
 import numpy as np
 
@@ -13,12 +15,6 @@ from .util import flatten_batch, infer_param_names, is_ragged_batch, prod, unfla
 Guesser = Callable[[Any, Any, GuessState], None]
 
 
-SeedEngine = Callable[
-    ["Model", Any, np.ndarray, Sequence[str], Optional[Mapping[str, float]], np.random.Generator],
-    Dict[str, float],
-]
-
-
 @dataclass
 class Model:
     """A model wraps a callable and parameter metadata."""
@@ -28,14 +24,25 @@ class Model:
     params: Tuple[ParameterSpec, ...]
     guessers: Tuple[Guesser, ...] = ()
     derived: Tuple[DerivedSpec, ...] = ()
-    seed_engine: Optional[SeedEngine] = None
-    meta: Dict[str, Any] = None
 
     # ---- constructor ----
     @staticmethod
     def from_function(func: Callable[..., Any], *, name: Optional[str] = None) -> "Model":
         names = infer_param_names(func)
-        specs = tuple(ParameterSpec(name=n) for n in names)
+
+        # Treat numeric defaults in the function signature as default guesses.
+        sig = inspect.signature(func)
+        specs = []
+        for n in names:
+            p = sig.parameters[n]
+            g = None
+            if p.default is not inspect._empty:
+                d = p.default
+                if isinstance(d, (int, float, np.number)) and not isinstance(d, bool):
+                    g = float(d)
+            # Function defaults should be weak guesses: let guessers override them.
+            specs.append(ParameterSpec(name=n, weak_guess=g))
+        specs = tuple(specs)
         return Model(name=name or getattr(func, "__name__", "model"), func=func, param_names=names, params=specs)
 
     # ---- evaluation ----
@@ -95,6 +102,19 @@ class Model:
                 raise KeyError(k)
             m[k] = replace(m[k], guess=float(g))
         return replace(self, params=tuple(m[n] for n in self.param_names))
+    
+    def weak_guess(self, **guesses: float) -> "Model":
+        """Set weak (low-precedence) guesses.
+
+        Weak guesses are used only if guessers don't provide a value for that parameter.
+        Strong guesses set via .guess(...) override guessers.
+        """
+        m = {p.name: p for p in self.params}
+        for k, g in guesses.items():
+            if k not in m:
+                raise KeyError(k)
+            m[k] = replace(m[k], weak_guess=float(g))
+        return replace(self, params=tuple(m[n] for n in self.param_names))
 
     def prior(self, **priors: Tuple[str, Any]) -> "Model":
         m = {p.name: p for p in self.params}
@@ -117,37 +137,11 @@ class Model:
         """Return a new Model with `fn` appended to the guesser list."""
         return replace(self, guessers=self.guessers + (fn,))
 
-    def with_seed_engine(self, fn: SeedEngine) -> "Model":
-        """Return a new Model with a custom seed engine.
-
-        The engine is called as:
-            fn(model, x, y, free_names, user_seed, rng) -> dict(name -> value)
-        """
-        return replace(self, seed_engine=fn)
-
-    def guesser(self, fn: Optional[Guesser] = None):
-        """Decorator helper for defining guesser functions without mutating the model.
-
-        Usage
-        -----
-        @model.guesser
-        def init_gaussian(x, y, g):
-            ...
-
-        model = model.with_guesser(init_gaussian)
-        """
-        def decorator(f: Guesser) -> Guesser:
-            return f
-
-        if fn is None:
-            return decorator
-        return decorator(fn)
-
     def seed(
         self,
-        *,
         x: Any,
         y: Any,
+        *,
         seed: Optional[Mapping[str, float]] = None,
         data_format: Optional[str] = None,
         parallel: Optional[Literal[None, "auto"]] = None,
@@ -160,8 +154,8 @@ class Model:
         seed parameter view directly.
         """
         run = self.fit(
-            x=x,
-            y=y,
+            x,
+            y,
             backend="scipy.curve_fit",
             data_format=data_format,
             parallel=parallel,
@@ -178,9 +172,9 @@ class Model:
     # ---- fitting ----
     def fit(
         self,
-        *,
         x: Any,
         y: Any,
+        *,
         backend: Literal["scipy.curve_fit", "scipy.minimize", "ultranest"] = "scipy.curve_fit",
         data_format: Optional[str] = None,
         parallel: Optional[Literal[None, "auto"]] = None,
@@ -236,12 +230,8 @@ class Model:
         seed_values = {n: np.empty((B,), dtype=float) for n in self.param_names}
         covs: List[Optional[np.ndarray]] = []
 
-        meta: Dict[str, Any] = {
-            "mode": "seed" if skip else "fit",
-            "free_param_names": list(free_names),
-            "success": [],
-            "message": [],
-        }
+        successes: List[bool] = []
+        messages: List[str] = []
 
         for i, ds in enumerate(datasets):
             xi = ds["x"]
@@ -260,8 +250,8 @@ class Model:
                 seed_values[n][i] = float(fv)
 
             if skip:
-                meta["success"].append(True)
-                meta["message"].append("skipped (seed only)")
+                successes.append(True)
+                messages.append("skipped (seed only)")
                 for j, n in enumerate(free_names):
                     values[n][i] = p0[j]
                 for n, fv in fixed_map.items():
@@ -282,8 +272,8 @@ class Model:
                 bounds=bounds,
                 maxfev=backend_options.get("maxfev"),
             )
-            meta["success"].append(r.success)
-            meta["message"].append(r.message)
+            successes.append(bool(r.success))
+            messages.append(str(r.message))
 
             # store free values
             for j, n in enumerate(free_names):
@@ -335,7 +325,6 @@ class Model:
                 seed=ParamsView(seed_items),
                 cov=cov,
                 backend=backend,
-                meta=meta,
             )
         else:
             items = {}
@@ -373,7 +362,6 @@ class Model:
                 seed=ParamsView(seed_items),
                 cov=cov,
                 backend=backend,
-                meta=meta,
             )
 
         # Post-fit derived params (v1): depend only on fitted params
@@ -411,8 +399,9 @@ class Model:
             results=results,
             backend=backend,
             data_format=(data_format or "normal"),
-            meta=meta,
             data={"x": x, "y": y},
+            success=(successes[0] if batch_shape == () else unflatten_batch(np.asarray(successes, bool), batch_shape)),
+            message=(messages[0] if batch_shape == () else unflatten_batch(np.asarray(messages, object), batch_shape)),
         )
 
         return run
@@ -483,31 +472,41 @@ def _default_seed_engine(
     x: Any,
     y: np.ndarray,
     free_names: Sequence[str],
-    rng: np.random.Generator,
 ) -> Dict[str, float]:
     """Built-in seeding strategy.
 
     Order (before per-call seed overlay):
-    1) model-level .guess(...)
-    2) user guessers
+    1) model-level strong .guess(...)
+    2) user guessers (cannot override strong guesses)
+    3) model-level weak_guess (used only if still missing)
     """
     pmap = {p.name: p for p in model.params}
     seeds: Dict[str, float] = {}
+    strong: set[str] = set()
 
-    # explicit model guesses
+    # 1) strong guesses
     for n in free_names:
         spec = pmap[n]
         if spec.guess is not None:
             seeds[n] = float(spec.guess)
+            strong.add(n)
 
-    # user guessers
+    # 2) user guessers (only fill if not strong, and not already set)
     if model.guessers:
         gs = GuessState()
         for fn in model.guessers:
             fn(x, y, gs)
         for n, v in gs.to_dict().items():
-            if n in free_names and n not in seeds:
+            if n in free_names and n not in strong and n not in seeds:
                 seeds[n] = float(v)
+
+    # 3) weak guesses (only fill if still missing)
+    for n in free_names:
+        if n in seeds:
+            continue
+        spec = pmap[n]
+        if getattr(spec, "weak_guess", None) is not None:
+            seeds[n] = float(spec.weak_guess)  # type: ignore[union-attr]
 
     return seeds
 
@@ -525,22 +524,19 @@ def _compute_seed_map(
     Precedence per free parameter:
 
       1) per-call `user_seed` (fit(..., seed=...))
-      2) ParameterSpec.guess via model.guess(...)
-      3) model guessers (functions registered with with_guesser)
-      4) midpoint of finite bounds (with a warning)
-      5) else: raise ValueError
+      2) strong guess via model.guess(...)
+      3) model guessers (with_guesser)
+      4) weak guess via model.weak_guess(...) (and function defaults)
+      5) midpoint of finite bounds (with a warning)
+      6) else: raise ValueError
     """
     from warnings import warn
 
     free_names = list(free_names)
     pmap = {p.name: p for p in model.params}
-
-    # 1+2+3 via seed engine (or default)
-    if model.seed_engine is not None:
-        # custom engine can take user_seed + rng if it wants
-        seeds = dict(model.seed_engine(model, x, y, free_names, user_seed, rng))
-    else:
-        seeds = _default_seed_engine(model, x, y, free_names, rng)
+    
+    # 2+3: model guesses + guessers
+    seeds = _default_seed_engine(model, x, y, free_names)
 
     # keep only known free names
     seeds = {n: float(v) for n, v in seeds.items() if n in free_names}

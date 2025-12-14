@@ -19,7 +19,7 @@ sigma = 1.2
 y = y_true + rng.normal(0, sigma, size=x.size)
 
 # Model.fit now always returns a Run
-run = model.fit(x=x, y=(y, sigma)).squeeze()
+run = model.fit(x, (y, sigma)).squeeze()
 res = run.results
 
 print(res["m"].value, "±", res["m"].stderr)

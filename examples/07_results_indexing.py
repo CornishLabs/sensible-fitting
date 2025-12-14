@@ -29,7 +29,7 @@ def main() -> None:
     )
     y = y_clean + rng.normal(0, sigma, size=y_clean.shape)
 
-    run = model.fit(x=x, y=(y, sigma))
+    run = model.fit(x, (y, sigma))
     res = run.results
 
     print("batch_shape:", res.batch_shape)

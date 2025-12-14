@@ -20,8 +20,8 @@ y = model.eval(x, amplitude=2.0, frequency=3.0) + rng.normal(0, sigma, size=x.si
 
 # Always a Run; skip=True => "seed only" mode
 run = model.fit(
-    x=x,
-    y=(y, sigma),
+    x,
+    (y, sigma),
     skip=not fit_data,
 ).squeeze()
 

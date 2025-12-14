@@ -19,7 +19,7 @@ x = np.linspace(-3, 3, 200)
 sigma_y = 0.05
 y = model.eval(x, amp=1.0, mu=0.2, sigma=0.7) + rng.normal(0, sigma_y, size=x.size)
 
-run = model.fit(x=x, y=(y, sigma_y)).squeeze()
+run = model.fit(x, (y, sigma_y)).squeeze()
 res = run.results
 
 print("sigma:", res["sigma"].value)

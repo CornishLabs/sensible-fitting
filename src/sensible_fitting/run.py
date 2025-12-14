@@ -14,7 +14,6 @@ class Band:
     low: np.ndarray
     high: np.ndarray
     median: Optional[np.ndarray] = None
-    meta: Dict[str, Any] = None
 
 
 @dataclass(frozen=True)
@@ -24,7 +23,6 @@ class Results:
     seed: Optional[ParamsView] = None
     cov: Optional[np.ndarray] = None
     backend: str = ""
-    meta: Dict[str, Any] = None
 
     def __getitem__(self, key):
         # ---- Parameter access sugar ----------------------------------------
@@ -59,7 +57,6 @@ class Results:
                 fixed=_slice(pv.fixed) if isinstance(pv.fixed, np.ndarray) else pv.fixed,
                 bounds=pv.bounds,
                 derived=pv.derived,
-                meta=pv.meta,
             )
 
         new_seed = None
@@ -73,7 +70,6 @@ class Results:
                     fixed=_slice(pv.fixed) if isinstance(pv.fixed, np.ndarray) else pv.fixed,
                     bounds=pv.bounds,
                     derived=pv.derived,
-                    meta=pv.meta,
                 )
             new_seed = ParamsView(seed_items)
 
@@ -94,11 +90,9 @@ class Results:
             seed=new_seed,
             cov=cov,
             backend=self.backend,
-            meta=self.meta,
         )
 
     def summary(self, digits: int = 4) -> str:
-        meta = self.meta or {}
         lines = [f"Results(backend={self.backend!r}, batch_shape={self.batch_shape})"]
 
         if self.batch_shape == ():
@@ -144,8 +138,9 @@ class Run:
     results: Results
     backend: str
     data_format: str
-    meta: Dict[str, Any] = None
     data: Dict[str, Any] = None
+    success: Any = True
+    message: Any = ""
 
     def squeeze(self) -> "Run":
         if self.results.batch_shape == ():
@@ -167,7 +162,7 @@ class Run:
             for k, v in self.data.items():
                 # Ragged batch stores list-of-datasets; index directly.
                 if isinstance(v, list):
-                    sub_data[k] = v[idx]
+                    sub_data[k] = _index_ragged_list(v, idx)
 
                 # Structured payload tuples like (y, sigma) or (y, lo, hi):
                 # slice any numpy array that carries the batch dimension.
@@ -188,8 +183,9 @@ class Run:
             results=sub_results,
             backend=self.backend,
             data_format=self.data_format,
-            meta=self.meta,
             data=sub_data,
+            success=_slice_like(self.success, idx),
+            message=_slice_like(self.message, idx),
         )
 
     def predict(
@@ -255,11 +251,12 @@ class Run:
         cov = self.results.cov
         if cov is None:
             raise ValueError("No covariance available for band().")
-
-        meta = self.results.meta or {}
-        free_names = meta.get("free_param_names")
+        
+        # Derive free parameter names from the model (no meta required).
+        free_names = [p.name for p in getattr(self.model, "params") if not p.fixed]
         if not free_names:
-            raise ValueError("Results.meta['free_param_names'] missing; cannot compute band().")
+            raise ValueError("No free parameters; cannot compute band().")
+
 
         mean = np.array([float(self.results.params[n].value) for n in free_names], dtype=float)
         cov = np.asarray(cov, dtype=float)
@@ -276,4 +273,43 @@ class Run:
         hi = np.quantile(preds, qhi, axis=0)
         med = np.quantile(preds, 0.5, axis=0)
 
-        return Band(low=lo, high=hi, median=med, meta={"method": "covariance", "q": (qlo, qhi)})
+        return Band(low=lo, high=hi, median=med)
+
+
+def _normalize_ragged_index(idx: Any) -> Any:
+    # Ragged batches are 1D (list-of-datasets). squeeze() uses idx=(0,).
+    if isinstance(idx, tuple):
+        if len(idx) == 1:
+            return idx[0]
+        raise IndexError("Ragged batches support only 1D indexing.")
+    return idx
+
+
+def _index_ragged_list(v: list[Any], idx: Any) -> Any:
+    idx = _normalize_ragged_index(idx)
+
+    if isinstance(idx, (int, slice)):
+        return v[idx]
+
+    a = np.asarray(idx)
+    if a.dtype == bool:
+        if a.ndim != 1 or a.shape[0] != len(v):
+            raise IndexError("Boolean mask has wrong shape for ragged batch.")
+        return [vv for vv, keep in zip(v, a.tolist()) if keep]
+
+    inds = [int(i) for i in a.ravel().tolist()]
+    return [v[i] for i in inds]
+
+
+def _slice_like(v: Any, idx: Any) -> Any:
+    """Slice success/message arrays similarly to Results slicing."""
+    idx = _normalize_ragged_index(idx)
+    if isinstance(v, (bool, str)) or v is None:
+        return v
+    try:
+        a = np.asarray(v)
+        if a.shape == ():
+            return v
+        return a[idx]
+    except Exception:
+        return v

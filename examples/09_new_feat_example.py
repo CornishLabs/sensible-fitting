@@ -8,7 +8,6 @@ from sensible_fitting import models
 
 base_model = models.sinusoid(name="seed-demo")
 
-@base_model.guesser
 def tweak_guess(x, y, g):
     if g.is_unset("amplitude"):
         g.amplitude = 1.0
@@ -37,7 +36,7 @@ y = y_clean + rng.normal(0, sigma, size=x.size)
 
 # --- 1) Use Model.seed(...) to look at the seed curve ------------------------
 
-seed_params = model.seed(x=x, y=(y, sigma))
+seed_params = model.seed(x, (y, sigma))
 print("Seed parameters:")
 for name, pv in seed_params.items():
     print(f"  {name:>10s} = {pv.value:.4g}")
@@ -45,8 +44,8 @@ for name, pv in seed_params.items():
 # --- 2) Do a seed-only 'fit' (skip=True) -------------------------------------
 
 run_seed = model.fit(
-    x=x,
-    y=(y, sigma),
+    x,
+    (y, sigma),
     skip=True,          # seed-only mode
 ).squeeze()
 
@@ -55,8 +54,8 @@ run_seed = model.fit(
 # --- 3) Do a real fit --------------------------------------------------------
 
 run_fit = model.fit(
-    x=x,
-    y=(y, sigma),
+    x,
+    (y, sigma),
 ).squeeze()
 
 res = run_fit.results
@@ -67,8 +66,8 @@ print(res.summary(digits=4))
 
 forced_seed = {"frequency": 6.0}
 run_forced_seed = model.fit(
-    x=x,
-    y=(y, sigma),
+    x,
+    (y, sigma),
     seed=forced_seed,
     skip=True,          # use *only* this seed, no optimisation
 ).squeeze()

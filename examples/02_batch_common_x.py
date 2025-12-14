@@ -21,7 +21,7 @@ sigma = 0.2
 y_clean = np.stack([model.eval(x, amplitude=A[i], frequency=F[i]) for i in range(N_SYSTEMS)])
 y = y_clean + rng.normal(0, sigma, size=y_clean.shape)
 
-run = model.fit(x=x, y=(y, sigma))
+run = model.fit(x, (y, sigma))
 res = run.results
 print(res.summary(digits=4))
 

@@ -20,10 +20,12 @@ class ParameterSpec:
     fixed: bool = False
     fixed_value: Optional[float] = None
     bounds: Optional[Tuple[Optional[float], Optional[float]]] = None
+    # Strong guess: overrides guessers
     guess: Optional[float] = None
+    # Weak guess: used only if guessers don't provide a value
+    weak_guess: Optional[float] = None
     # Stored for Bayesian backends (ignored by curve_fit in v1)
     prior: Optional[Tuple[str, Tuple[Any, ...]]] = None
-    meta: Dict[str, Any] = None
 
 
 @dataclass(frozen=True)
@@ -37,7 +39,6 @@ class DerivedSpec:
     name: str
     func: Any  # Callable[[Mapping[str, float]], float]
     doc: str = ""
-    meta: Dict[str, Any] = None
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,6 @@ class ParamView:
     fixed: Any = False
     bounds: Optional[Tuple[Optional[float], Optional[float]]] = None
     derived: bool = False
-    meta: Dict[str, Any] = None
 
     # Backwards-compatible alias
     @property
@@ -88,7 +88,6 @@ class MultiParamView:
     names: Tuple[str, ...]
     value: Any
     stderr: Any = None
-    meta: Dict[str, Any] = None
 
     @property
     def u(self):
@@ -154,24 +153,21 @@ class ParamsView(Mapping[str, ParamView]):
 
         values = []
         stderrs = []
-        have_err = False
+        all_have_err = True
         for n in names:
             pv = self._items[n]
             v = np.asarray(pv.value)
             values.append(v)
             if pv.stderr is None:
+                all_have_err = False
                 stderrs.append(None)
             else:
                 stderrs.append(np.asarray(pv.stderr))
-                have_err = True
 
         value_arr = np.stack(values, axis=-1)
         stderr_arr = None
-        if have_err:
-            filled = []
-            for v, e in zip(values, stderrs):
-                filled.append(np.zeros_like(v, dtype=float) if e is None else e)
-            stderr_arr = np.stack(filled, axis=-1)
+        if all_have_err:
+            stderr_arr = np.stack([np.asarray(e) for e in stderrs], axis=-1)  # type: ignore[arg-type]
 
         return MultiParamView(names=names, value=value_arr, stderr=stderr_arr)
 

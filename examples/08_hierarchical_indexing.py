@@ -64,14 +64,14 @@ def main() -> None:
         y = y_clean + rng.normal(0, sigma_y, size=y_clean.shape)
 
         # First-level batch fit: get frequency per system
-        run_sin = sin_model.fit(x=x, y=(y, sigma_y))
+        run_sin = sin_model.fit(x, (y, sigma_y))
         res_sin = run_sin.results
 
         freqs = res_sin["frequency"].value
         freq_err = res_sin["frequency"].stderr
 
         # Second-level fit: line through frequencies vs. index
-        run_line = line_model.fit(x=idx, y=(freqs, freq_err)).squeeze()
+        run_line = line_model.fit(idx, (freqs, freq_err)).squeeze()
         res_line = run_line.results
 
         a_hat = res_line["a"].value

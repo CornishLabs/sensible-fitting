@@ -15,7 +15,7 @@ x = np.linspace(0, 4, 50)
 sigma = 0.3
 y = line(x, 1.7, -0.4) + rng.normal(0, sigma, size=x.size)
 
-run_cf = model.fit(x=x, y=(y, sigma), backend="scipy.curve_fit").squeeze()
+run_cf = model.fit(x, (y, sigma), backend="scipy.curve_fit").squeeze()
 
 fig, ax = plt.subplots()
 ax.errorbar(x, y, yerr=sigma, fmt=".", label="data")

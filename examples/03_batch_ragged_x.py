@@ -15,5 +15,5 @@ for i in range(3):
     xs.append(x)
     ys.append((y, sigma))
 
-run = model.fit(x=xs, y=ys)
+run = model.fit(xs, ys)
 print(run.results.summary(digits=4))
