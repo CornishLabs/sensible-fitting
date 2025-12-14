@@ -7,6 +7,7 @@ from ..model import Model
 
 # --- Gaussian with offset, OITG-style ---------------------------------------
 
+
 def gaussian_with_offset_func(x, x0, y0, a, sigma):
     """Gaussian with baseline: y = y0 + a * exp(-0.5 * ((x - x0)/sigma)^2)."""
     return y0 + a * np.exp(-0.5 * ((x - x0) / sigma) ** 2)
@@ -84,14 +85,10 @@ def gaussian_with_offset(*, name: str = "gaussian") -> Model:
             else:
                 g.sigma = 0.2 * span
 
-    model = (
-        base
-        .with_guesser(init_gaussian)
-        .derive(
-            "fwhm",
-            lambda p: 2.35482 * p["sigma"],
-            doc="Full-width at half maximum (2.35482 * sigma)",
-        )
+    model = base.with_guesser(init_gaussian).derive(
+        "fwhm",
+        lambda p: 2.35482 * p["sigma"],
+        doc="Full-width at half maximum (2.35482 * sigma)",
     )
 
     return model

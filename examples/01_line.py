@@ -7,10 +7,7 @@ def line(x, m, b):
     return m * x + b
 
 
-model = (
-    Model.from_function(line, name="straight line")
-    .bound(m=(-10, 10), b=(-10, 10))
-)
+model = Model.from_function(line, name="straight line").bound(m=(-10, 10), b=(-10, 10))
 
 rng = np.random.default_rng(0)
 x = np.linspace(0, 10, 20)
@@ -26,6 +23,8 @@ print(res["m"].value, "±", res["m"].stderr)
 print(res["b"].value, "±", res["b"].stderr)
 print(res.summary(digits=4))
 
+
+# Plotting
 fig, ax = plt.subplots()
 ax.errorbar(x, y, yerr=sigma, fmt="o", ms=4, capsize=2, label="data")
 

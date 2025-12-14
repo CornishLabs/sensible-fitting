@@ -32,7 +32,11 @@ class Results:
         if isinstance(key, str):
             return self.params[key]
 
-        if isinstance(key, (tuple, list)) and key and all(isinstance(k, str) for k in key):
+        if (
+            isinstance(key, (tuple, list))
+            and key
+            and all(isinstance(k, str) for k in key)
+        ):
             return self.params[key]
 
         # ---- Batch slicing --------------------------------------------------
@@ -54,7 +58,9 @@ class Results:
                 name=name,
                 value=_slice(pv.value),
                 stderr=_slice(pv.stderr),
-                fixed=_slice(pv.fixed) if isinstance(pv.fixed, np.ndarray) else pv.fixed,
+                fixed=_slice(pv.fixed)
+                if isinstance(pv.fixed, np.ndarray)
+                else pv.fixed,
                 bounds=pv.bounds,
                 derived=pv.derived,
             )
@@ -67,7 +73,9 @@ class Results:
                     name=name,
                     value=_slice(pv.value),
                     stderr=_slice(pv.stderr),
-                    fixed=_slice(pv.fixed) if isinstance(pv.fixed, np.ndarray) else pv.fixed,
+                    fixed=_slice(pv.fixed)
+                    if isinstance(pv.fixed, np.ndarray)
+                    else pv.fixed,
                     bounds=pv.bounds,
                     derived=pv.derived,
                 )
@@ -103,7 +111,9 @@ class Results:
                 if e is None:
                     lines.append(f"  {name:>12s}: {float(v):.{digits}g}{tag}")
                 else:
-                    lines.append(f"  {name:>12s}: {float(v):.{digits}g} ± {float(e):.{digits}g}{tag}")
+                    lines.append(
+                        f"  {name:>12s}: {float(v):.{digits}g} ± {float(e):.{digits}g}{tag}"
+                    )
             return "\n".join(lines)
 
         batch_size = prod(self.batch_shape)
@@ -147,7 +157,9 @@ class Run:
             return self
         batch_size = prod(self.results.batch_shape)
         if batch_size != 1:
-            raise ValueError(f"run.squeeze() requires exactly one fit; got batch_size={batch_size}. Slice first.")
+            raise ValueError(
+                f"run.squeeze() requires exactly one fit; got batch_size={batch_size}. Slice first."
+            )
         idx = tuple(0 for _ in self.results.batch_shape)
         return self[idx]
 
@@ -169,7 +181,11 @@ class Run:
                 elif isinstance(v, tuple):
                     parts = []
                     for part in v:
-                        if isinstance(part, np.ndarray) and bs != () and part.shape[: len(bs)] == bs:
+                        if (
+                            isinstance(part, np.ndarray)
+                            and bs != ()
+                            and part.shape[: len(bs)] == bs
+                        ):
                             parts.append(part[idx])
                         else:
                             parts.append(part)
@@ -229,7 +245,9 @@ class Run:
         rng: Optional[np.random.Generator] = None,
     ) -> Band:
         if self.results.batch_shape != ():
-            raise ValueError("run.band() requires a scalar run. Slice first (e.g., run[i].band(...)).")
+            raise ValueError(
+                "run.band() requires a scalar run. Slice first (e.g., run[i].band(...))."
+            )
 
         if rng is None:
             rng = np.random.default_rng()
@@ -251,14 +269,15 @@ class Run:
         cov = self.results.cov
         if cov is None:
             raise ValueError("No covariance available for band().")
-        
+
         # Derive free parameter names from the model (no meta required).
         free_names = [p.name for p in getattr(self.model, "params") if not p.fixed]
         if not free_names:
             raise ValueError("No free parameters; cannot compute band().")
 
-
-        mean = np.array([float(self.results.params[n].value) for n in free_names], dtype=float)
+        mean = np.array(
+            [float(self.results.params[n].value) for n in free_names], dtype=float
+        )
         cov = np.asarray(cov, dtype=float)
 
         theta = sample_mvn(mean, cov, int(nsamples), rng)  # (S,P)

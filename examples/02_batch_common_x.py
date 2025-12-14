@@ -18,7 +18,9 @@ A = A0 * (1 + 0.08 * rng.normal(size=N_SYSTEMS))
 F = F0 * (1 + 0.1 * rng.normal(size=N_SYSTEMS))
 
 sigma = 0.2
-y_clean = np.stack([model.eval(x, amplitude=A[i], frequency=F[i]) for i in range(N_SYSTEMS)])
+y_clean = np.stack(
+    [model.eval(x, amplitude=A[i], frequency=F[i]) for i in range(N_SYSTEMS)]
+)
 y = y_clean + rng.normal(0, sigma, size=y_clean.shape)
 
 run = model.fit(x, (y, sigma))

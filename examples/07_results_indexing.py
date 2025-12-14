@@ -14,7 +14,6 @@ def main() -> None:
         .guess(frequency=3.0)
     )
 
-
     rng = np.random.default_rng(0)
     N_SYSTEMS, N = 4, 200
     x = np.linspace(0, 1, N)

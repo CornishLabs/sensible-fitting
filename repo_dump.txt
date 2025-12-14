@@ -75,7 +75,7 @@ sigma = 1.2
 y = y_true + rng.normal(0, sigma, size=x.size)
 
 # Model.fit now always returns a Run
-run = model.fit(x=x, y=(y, sigma)).squeeze()
+run = model.fit(x, (y, sigma)).squeeze()
 res = run.results
 
 print(res["m"].value, "±", res["m"].stderr)
@@ -122,7 +122,7 @@ sigma = 0.2
 y_clean = np.stack([model.eval(x, amplitude=A[i], frequency=F[i]) for i in range(N_SYSTEMS)])
 y = y_clean + rng.normal(0, sigma, size=y_clean.shape)
 
-run = model.fit(x=x, y=(y, sigma))
+run = model.fit(x, (y, sigma))
 res = run.results
 print(res.summary(digits=4))
 
@@ -162,7 +162,7 @@ for i in range(3):
     xs.append(x)
     ys.append((y, sigma))
 
-run = model.fit(x=xs, y=ys)
+run = model.fit(xs, ys)
 print(run.results.summary(digits=4))
 
 
@@ -185,7 +185,7 @@ x = np.linspace(0, 4, 50)
 sigma = 0.3
 y = line(x, 1.7, -0.4) + rng.normal(0, sigma, size=x.size)
 
-run_cf = model.fit(x=x, y=(y, sigma), backend="scipy.curve_fit").squeeze()
+run_cf = model.fit(x, (y, sigma), backend="scipy.curve_fit").squeeze()
 
 fig, ax = plt.subplots()
 ax.errorbar(x, y, yerr=sigma, fmt=".", label="data")
@@ -223,7 +223,7 @@ x = np.linspace(-3, 3, 200)
 sigma_y = 0.05
 y = model.eval(x, amp=1.0, mu=0.2, sigma=0.7) + rng.normal(0, sigma_y, size=x.size)
 
-run = model.fit(x=x, y=(y, sigma_y)).squeeze()
+run = model.fit(x, (y, sigma_y)).squeeze()
 res = run.results
 
 print("sigma:", res["sigma"].value)
@@ -254,8 +254,8 @@ y = model.eval(x, amplitude=2.0, frequency=3.0) + rng.normal(0, sigma, size=x.si
 
 # Always a Run; skip=True => "seed only" mode
 run = model.fit(
-    x=x,
-    y=(y, sigma),
+    x,
+    (y, sigma),
     skip=not fit_data,
 ).squeeze()
 
@@ -316,7 +316,7 @@ def main() -> None:
     )
     y = y_clean + rng.normal(0, sigma, size=y_clean.shape)
 
-    run = model.fit(x=x, y=(y, sigma))
+    run = model.fit(x, (y, sigma))
     res = run.results
 
     print("batch_shape:", res.batch_shape)
@@ -443,14 +443,14 @@ def main() -> None:
         y = y_clean + rng.normal(0, sigma_y, size=y_clean.shape)
 
         # First-level batch fit: get frequency per system
-        run_sin = sin_model.fit(x=x, y=(y, sigma_y))
+        run_sin = sin_model.fit(x, (y, sigma_y))
         res_sin = run_sin.results
 
         freqs = res_sin["frequency"].value
         freq_err = res_sin["frequency"].stderr
 
         # Second-level fit: line through frequencies vs. index
-        run_line = line_model.fit(x=idx, y=(freqs, freq_err)).squeeze()
+        run_line = line_model.fit(idx, (freqs, freq_err)).squeeze()
         res_line = run_line.results
 
         a_hat = res_line["a"].value
@@ -493,7 +493,6 @@ from sensible_fitting import models
 
 base_model = models.sinusoid(name="seed-demo")
 
-@base_model.guesser
 def tweak_guess(x, y, g):
     if g.is_unset("amplitude"):
         g.amplitude = 1.0
@@ -522,7 +521,7 @@ y = y_clean + rng.normal(0, sigma, size=x.size)
 
 # --- 1) Use Model.seed(...) to look at the seed curve ------------------------
 
-seed_params = model.seed(x=x, y=(y, sigma))
+seed_params = model.seed(x, (y, sigma))
 print("Seed parameters:")
 for name, pv in seed_params.items():
     print(f"  {name:>10s} = {pv.value:.4g}")
@@ -530,8 +529,8 @@ for name, pv in seed_params.items():
 # --- 2) Do a seed-only 'fit' (skip=True) -------------------------------------
 
 run_seed = model.fit(
-    x=x,
-    y=(y, sigma),
+    x,
+    (y, sigma),
     skip=True,          # seed-only mode
 ).squeeze()
 
@@ -540,8 +539,8 @@ run_seed = model.fit(
 # --- 3) Do a real fit --------------------------------------------------------
 
 run_fit = model.fit(
-    x=x,
-    y=(y, sigma),
+    x,
+    (y, sigma),
 ).squeeze()
 
 res = run_fit.results
@@ -552,8 +551,8 @@ print(res.summary(digits=4))
 
 forced_seed = {"frequency": 6.0}
 run_forced_seed = model.fit(
-    x=x,
-    y=(y, sigma),
+    x,
+    (y, sigma),
     seed=forced_seed,
     skip=True,          # use *only* this seed, no optimisation
 ).squeeze()
@@ -697,7 +696,9 @@ def fit_curve_fit(
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Dict, List, Literal, Mapping, Optional, Sequence, Tuple, Union
+import inspect
+from typing import Any, Callable, Dict, List, Literal, Mapping, Optional, Sequence, Tuple
+ 
 
 import numpy as np
 
@@ -709,12 +710,6 @@ from .util import flatten_batch, infer_param_names, is_ragged_batch, prod, unfla
 Guesser = Callable[[Any, Any, GuessState], None]
 
 
-SeedEngine = Callable[
-    ["Model", Any, np.ndarray, Sequence[str], Optional[Mapping[str, float]], np.random.Generator],
-    Dict[str, float],
-]
-
-
 @dataclass
 class Model:
     """A model wraps a callable and parameter metadata."""
@@ -724,14 +719,25 @@ class Model:
     params: Tuple[ParameterSpec, ...]
     guessers: Tuple[Guesser, ...] = ()
     derived: Tuple[DerivedSpec, ...] = ()
-    seed_engine: Optional[SeedEngine] = None
-    meta: Dict[str, Any] = None
 
     # ---- constructor ----
     @staticmethod
     def from_function(func: Callable[..., Any], *, name: Optional[str] = None) -> "Model":
         names = infer_param_names(func)
-        specs = tuple(ParameterSpec(name=n) for n in names)
+
+        # Treat numeric defaults in the function signature as default guesses.
+        sig = inspect.signature(func)
+        specs = []
+        for n in names:
+            p = sig.parameters[n]
+            g = None
+            if p.default is not inspect._empty:
+                d = p.default
+                if isinstance(d, (int, float, np.number)) and not isinstance(d, bool):
+                    g = float(d)
+            # Function defaults should be weak guesses: let guessers override them.
+            specs.append(ParameterSpec(name=n, weak_guess=g))
+        specs = tuple(specs)
         return Model(name=name or getattr(func, "__name__", "model"), func=func, param_names=names, params=specs)
 
     # ---- evaluation ----
@@ -791,6 +797,19 @@ class Model:
                 raise KeyError(k)
             m[k] = replace(m[k], guess=float(g))
         return replace(self, params=tuple(m[n] for n in self.param_names))
+    
+    def weak_guess(self, **guesses: float) -> "Model":
+        """Set weak (low-precedence) guesses.
+
+        Weak guesses are used only if guessers don't provide a value for that parameter.
+        Strong guesses set via .guess(...) override guessers.
+        """
+        m = {p.name: p for p in self.params}
+        for k, g in guesses.items():
+            if k not in m:
+                raise KeyError(k)
+            m[k] = replace(m[k], weak_guess=float(g))
+        return replace(self, params=tuple(m[n] for n in self.param_names))
 
     def prior(self, **priors: Tuple[str, Any]) -> "Model":
         m = {p.name: p for p in self.params}
@@ -813,37 +832,11 @@ class Model:
         """Return a new Model with `fn` appended to the guesser list."""
         return replace(self, guessers=self.guessers + (fn,))
 
-    def with_seed_engine(self, fn: SeedEngine) -> "Model":
-        """Return a new Model with a custom seed engine.
-
-        The engine is called as:
-            fn(model, x, y, free_names, user_seed, rng) -> dict(name -> value)
-        """
-        return replace(self, seed_engine=fn)
-
-    def guesser(self, fn: Optional[Guesser] = None):
-        """Decorator helper for defining guesser functions without mutating the model.
-
-        Usage
-        -----
-        @model.guesser
-        def init_gaussian(x, y, g):
-            ...
-
-        model = model.with_guesser(init_gaussian)
-        """
-        def decorator(f: Guesser) -> Guesser:
-            return f
-
-        if fn is None:
-            return decorator
-        return decorator(fn)
-
     def seed(
         self,
-        *,
         x: Any,
         y: Any,
+        *,
         seed: Optional[Mapping[str, float]] = None,
         data_format: Optional[str] = None,
         parallel: Optional[Literal[None, "auto"]] = None,
@@ -856,8 +849,8 @@ class Model:
         seed parameter view directly.
         """
         run = self.fit(
-            x=x,
-            y=y,
+            x,
+            y,
             backend="scipy.curve_fit",
             data_format=data_format,
             parallel=parallel,
@@ -874,9 +867,9 @@ class Model:
     # ---- fitting ----
     def fit(
         self,
-        *,
         x: Any,
         y: Any,
+        *,
         backend: Literal["scipy.curve_fit", "scipy.minimize", "ultranest"] = "scipy.curve_fit",
         data_format: Optional[str] = None,
         parallel: Optional[Literal[None, "auto"]] = None,
@@ -932,12 +925,8 @@ class Model:
         seed_values = {n: np.empty((B,), dtype=float) for n in self.param_names}
         covs: List[Optional[np.ndarray]] = []
 
-        meta: Dict[str, Any] = {
-            "mode": "seed" if skip else "fit",
-            "free_param_names": list(free_names),
-            "success": [],
-            "message": [],
-        }
+        successes: List[bool] = []
+        messages: List[str] = []
 
         for i, ds in enumerate(datasets):
             xi = ds["x"]
@@ -956,8 +945,8 @@ class Model:
                 seed_values[n][i] = float(fv)
 
             if skip:
-                meta["success"].append(True)
-                meta["message"].append("skipped (seed only)")
+                successes.append(True)
+                messages.append("skipped (seed only)")
                 for j, n in enumerate(free_names):
                     values[n][i] = p0[j]
                 for n, fv in fixed_map.items():
@@ -978,8 +967,8 @@ class Model:
                 bounds=bounds,
                 maxfev=backend_options.get("maxfev"),
             )
-            meta["success"].append(r.success)
-            meta["message"].append(r.message)
+            successes.append(bool(r.success))
+            messages.append(str(r.message))
 
             # store free values
             for j, n in enumerate(free_names):
@@ -1031,7 +1020,6 @@ class Model:
                 seed=ParamsView(seed_items),
                 cov=cov,
                 backend=backend,
-                meta=meta,
             )
         else:
             items = {}
@@ -1069,7 +1057,6 @@ class Model:
                 seed=ParamsView(seed_items),
                 cov=cov,
                 backend=backend,
-                meta=meta,
             )
 
         # Post-fit derived params (v1): depend only on fitted params
@@ -1107,8 +1094,9 @@ class Model:
             results=results,
             backend=backend,
             data_format=(data_format or "normal"),
-            meta=meta,
             data={"x": x, "y": y},
+            success=(successes[0] if batch_shape == () else unflatten_batch(np.asarray(successes, bool), batch_shape)),
+            message=(messages[0] if batch_shape == () else unflatten_batch(np.asarray(messages, object), batch_shape)),
         )
 
         return run
@@ -1179,31 +1167,41 @@ def _default_seed_engine(
     x: Any,
     y: np.ndarray,
     free_names: Sequence[str],
-    rng: np.random.Generator,
 ) -> Dict[str, float]:
     """Built-in seeding strategy.
 
     Order (before per-call seed overlay):
-    1) model-level .guess(...)
-    2) user guessers
+    1) model-level strong .guess(...)
+    2) user guessers (cannot override strong guesses)
+    3) model-level weak_guess (used only if still missing)
     """
     pmap = {p.name: p for p in model.params}
     seeds: Dict[str, float] = {}
+    strong: set[str] = set()
 
-    # explicit model guesses
+    # 1) strong guesses
     for n in free_names:
         spec = pmap[n]
         if spec.guess is not None:
             seeds[n] = float(spec.guess)
+            strong.add(n)
 
-    # user guessers
+    # 2) user guessers (only fill if not strong, and not already set)
     if model.guessers:
         gs = GuessState()
         for fn in model.guessers:
             fn(x, y, gs)
         for n, v in gs.to_dict().items():
-            if n in free_names and n not in seeds:
+            if n in free_names and n not in strong and n not in seeds:
                 seeds[n] = float(v)
+
+    # 3) weak guesses (only fill if still missing)
+    for n in free_names:
+        if n in seeds:
+            continue
+        spec = pmap[n]
+        if getattr(spec, "weak_guess", None) is not None:
+            seeds[n] = float(spec.weak_guess)  # type: ignore[union-attr]
 
     return seeds
 
@@ -1221,22 +1219,19 @@ def _compute_seed_map(
     Precedence per free parameter:
 
       1) per-call `user_seed` (fit(..., seed=...))
-      2) ParameterSpec.guess via model.guess(...)
-      3) model guessers (functions registered with with_guesser)
-      4) midpoint of finite bounds (with a warning)
-      5) else: raise ValueError
+      2) strong guess via model.guess(...)
+      3) model guessers (with_guesser)
+      4) weak guess via model.weak_guess(...) (and function defaults)
+      5) midpoint of finite bounds (with a warning)
+      6) else: raise ValueError
     """
     from warnings import warn
 
     free_names = list(free_names)
     pmap = {p.name: p for p in model.params}
-
-    # 1+2+3 via seed engine (or default)
-    if model.seed_engine is not None:
-        # custom engine can take user_seed + rng if it wants
-        seeds = dict(model.seed_engine(model, x, y, free_names, user_seed, rng))
-    else:
-        seeds = _default_seed_engine(model, x, y, free_names, rng)
+    
+    # 2+3: model guesses + guessers
+    seeds = _default_seed_engine(model, x, y, free_names)
 
     # keep only known free names
     seeds = {n: float(v) for n, v in seeds.items() if n in free_names}
@@ -1453,10 +1448,12 @@ class ParameterSpec:
     fixed: bool = False
     fixed_value: Optional[float] = None
     bounds: Optional[Tuple[Optional[float], Optional[float]]] = None
+    # Strong guess: overrides guessers
     guess: Optional[float] = None
+    # Weak guess: used only if guessers don't provide a value
+    weak_guess: Optional[float] = None
     # Stored for Bayesian backends (ignored by curve_fit in v1)
     prior: Optional[Tuple[str, Tuple[Any, ...]]] = None
-    meta: Dict[str, Any] = None
 
 
 @dataclass(frozen=True)
@@ -1470,7 +1467,6 @@ class DerivedSpec:
     name: str
     func: Any  # Callable[[Mapping[str, float]], float]
     doc: str = ""
-    meta: Dict[str, Any] = None
 
 
 @dataclass(frozen=True)
@@ -1482,7 +1478,6 @@ class ParamView:
     fixed: Any = False
     bounds: Optional[Tuple[Optional[float], Optional[float]]] = None
     derived: bool = False
-    meta: Dict[str, Any] = None
 
     # Backwards-compatible alias
     @property
@@ -1521,7 +1516,6 @@ class MultiParamView:
     names: Tuple[str, ...]
     value: Any
     stderr: Any = None
-    meta: Dict[str, Any] = None
 
     @property
     def u(self):
@@ -1587,24 +1581,21 @@ class ParamsView(Mapping[str, ParamView]):
 
         values = []
         stderrs = []
-        have_err = False
+        all_have_err = True
         for n in names:
             pv = self._items[n]
             v = np.asarray(pv.value)
             values.append(v)
             if pv.stderr is None:
+                all_have_err = False
                 stderrs.append(None)
             else:
                 stderrs.append(np.asarray(pv.stderr))
-                have_err = True
 
         value_arr = np.stack(values, axis=-1)
         stderr_arr = None
-        if have_err:
-            filled = []
-            for v, e in zip(values, stderrs):
-                filled.append(np.zeros_like(v, dtype=float) if e is None else e)
-            stderr_arr = np.stack(filled, axis=-1)
+        if all_have_err:
+            stderr_arr = np.stack([np.asarray(e) for e in stderrs], axis=-1)  # type: ignore[arg-type]
 
         return MultiParamView(names=names, value=value_arr, stderr=stderr_arr)
 
@@ -1659,7 +1650,6 @@ class Band:
     low: np.ndarray
     high: np.ndarray
     median: Optional[np.ndarray] = None
-    meta: Dict[str, Any] = None
 
 
 @dataclass(frozen=True)
@@ -1669,7 +1659,6 @@ class Results:
     seed: Optional[ParamsView] = None
     cov: Optional[np.ndarray] = None
     backend: str = ""
-    meta: Dict[str, Any] = None
 
     def __getitem__(self, key):
         # ---- Parameter access sugar ----------------------------------------
@@ -1704,7 +1693,6 @@ class Results:
                 fixed=_slice(pv.fixed) if isinstance(pv.fixed, np.ndarray) else pv.fixed,
                 bounds=pv.bounds,
                 derived=pv.derived,
-                meta=pv.meta,
             )
 
         new_seed = None
@@ -1718,7 +1706,6 @@ class Results:
                     fixed=_slice(pv.fixed) if isinstance(pv.fixed, np.ndarray) else pv.fixed,
                     bounds=pv.bounds,
                     derived=pv.derived,
-                    meta=pv.meta,
                 )
             new_seed = ParamsView(seed_items)
 
@@ -1739,11 +1726,9 @@ class Results:
             seed=new_seed,
             cov=cov,
             backend=self.backend,
-            meta=self.meta,
         )
 
     def summary(self, digits: int = 4) -> str:
-        meta = self.meta or {}
         lines = [f"Results(backend={self.backend!r}, batch_shape={self.batch_shape})"]
 
         if self.batch_shape == ():
@@ -1789,8 +1774,9 @@ class Run:
     results: Results
     backend: str
     data_format: str
-    meta: Dict[str, Any] = None
     data: Dict[str, Any] = None
+    success: Any = True
+    message: Any = ""
 
     def squeeze(self) -> "Run":
         if self.results.batch_shape == ():
@@ -1812,7 +1798,7 @@ class Run:
             for k, v in self.data.items():
                 # Ragged batch stores list-of-datasets; index directly.
                 if isinstance(v, list):
-                    sub_data[k] = v[idx]
+                    sub_data[k] = _index_ragged_list(v, idx)
 
                 # Structured payload tuples like (y, sigma) or (y, lo, hi):
                 # slice any numpy array that carries the batch dimension.
@@ -1833,8 +1819,9 @@ class Run:
             results=sub_results,
             backend=self.backend,
             data_format=self.data_format,
-            meta=self.meta,
             data=sub_data,
+            success=_slice_like(self.success, idx),
+            message=_slice_like(self.message, idx),
         )
 
     def predict(
@@ -1900,11 +1887,12 @@ class Run:
         cov = self.results.cov
         if cov is None:
             raise ValueError("No covariance available for band().")
-
-        meta = self.results.meta or {}
-        free_names = meta.get("free_param_names")
+        
+        # Derive free parameter names from the model (no meta required).
+        free_names = [p.name for p in getattr(self.model, "params") if not p.fixed]
         if not free_names:
-            raise ValueError("Results.meta['free_param_names'] missing; cannot compute band().")
+            raise ValueError("No free parameters; cannot compute band().")
+
 
         mean = np.array([float(self.results.params[n].value) for n in free_names], dtype=float)
         cov = np.asarray(cov, dtype=float)
@@ -1921,8 +1909,46 @@ class Run:
         hi = np.quantile(preds, qhi, axis=0)
         med = np.quantile(preds, 0.5, axis=0)
 
-        return Band(low=lo, high=hi, median=med, meta={"method": "covariance", "q": (qlo, qhi)})
+        return Band(low=lo, high=hi, median=med)
 
+
+def _normalize_ragged_index(idx: Any) -> Any:
+    # Ragged batches are 1D (list-of-datasets). squeeze() uses idx=(0,).
+    if isinstance(idx, tuple):
+        if len(idx) == 1:
+            return idx[0]
+        raise IndexError("Ragged batches support only 1D indexing.")
+    return idx
+
+
+def _index_ragged_list(v: list[Any], idx: Any) -> Any:
+    idx = _normalize_ragged_index(idx)
+
+    if isinstance(idx, (int, slice)):
+        return v[idx]
+
+    a = np.asarray(idx)
+    if a.dtype == bool:
+        if a.ndim != 1 or a.shape[0] != len(v):
+            raise IndexError("Boolean mask has wrong shape for ragged batch.")
+        return [vv for vv, keep in zip(v, a.tolist()) if keep]
+
+    inds = [int(i) for i in a.ravel().tolist()]
+    return [v[i] for i in inds]
+
+
+def _slice_like(v: Any, idx: Any) -> Any:
+    """Slice success/message arrays similarly to Results slicing."""
+    idx = _normalize_ragged_index(idx)
+    if isinstance(v, (bool, str)) or v is None:
+        return v
+    try:
+        a = np.asarray(v)
+        if a.shape == ():
+            return v
+        return a[idx]
+    except Exception:
+        return v
 
 # === src/sensible_fitting/util.py ===
 

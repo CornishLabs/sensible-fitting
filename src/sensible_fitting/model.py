@@ -2,15 +2,31 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import inspect
-from typing import Any, Callable, Dict, List, Literal, Mapping, Optional, Sequence, Tuple
- 
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
+
 
 import numpy as np
 
 from .backends.scipy_curve_fit import fit_curve_fit
 from .params import DerivedSpec, GuessState, ParameterSpec, ParamView, ParamsView
 from .run import Results, Run
-from .util import flatten_batch, infer_param_names, is_ragged_batch, prod, unflatten_batch
+from .util import (
+    flatten_batch,
+    infer_param_names,
+    is_ragged_batch,
+    prod,
+    unflatten_batch,
+)
 
 Guesser = Callable[[Any, Any, GuessState], None]
 
@@ -18,6 +34,7 @@ Guesser = Callable[[Any, Any, GuessState], None]
 @dataclass
 class Model:
     """A model wraps a callable and parameter metadata."""
+
     name: str
     func: Callable[..., Any]
     param_names: Tuple[str, ...]
@@ -27,7 +44,9 @@ class Model:
 
     # ---- constructor ----
     @staticmethod
-    def from_function(func: Callable[..., Any], *, name: Optional[str] = None) -> "Model":
+    def from_function(
+        func: Callable[..., Any], *, name: Optional[str] = None
+    ) -> "Model":
         names = infer_param_names(func)
 
         # Treat numeric defaults in the function signature as default guesses.
@@ -43,10 +62,17 @@ class Model:
             # Function defaults should be weak guesses: let guessers override them.
             specs.append(ParameterSpec(name=n, weak_guess=g))
         specs = tuple(specs)
-        return Model(name=name or getattr(func, "__name__", "model"), func=func, param_names=names, params=specs)
+        return Model(
+            name=name or getattr(func, "__name__", "model"),
+            func=func,
+            param_names=names,
+            params=specs,
+        )
 
     # ---- evaluation ----
-    def eval(self, x: Any, *, params: Optional[Mapping[str, Any]] = None, **kwargs) -> Any:
+    def eval(
+        self, x: Any, *, params: Optional[Mapping[str, Any]] = None, **kwargs
+    ) -> Any:
         values: Dict[str, Any] = {}
 
         if params is not None:
@@ -102,7 +128,7 @@ class Model:
                 raise KeyError(k)
             m[k] = replace(m[k], guess=float(g))
         return replace(self, params=tuple(m[n] for n in self.param_names))
-    
+
     def weak_guess(self, **guesses: float) -> "Model":
         """Set weak (low-precedence) guesses.
 
@@ -128,10 +154,16 @@ class Model:
             m[k] = replace(m[k], prior=(kind, args))
         return replace(self, params=tuple(m[n] for n in self.param_names))
 
-    def derive(self, name: str, func: Callable[[Mapping[str, float]], float], *, doc: str = "") -> "Model":
+    def derive(
+        self, name: str, func: Callable[[Mapping[str, float]], float], *, doc: str = ""
+    ) -> "Model":
         if name in self.param_names:
-            raise ValueError(f"Derived name {name!r} conflicts with an existing parameter.")
-        return replace(self, derived=self.derived + (DerivedSpec(name=name, func=func, doc=doc),))
+            raise ValueError(
+                f"Derived name {name!r} conflicts with an existing parameter."
+            )
+        return replace(
+            self, derived=self.derived + (DerivedSpec(name=name, func=func, doc=doc),)
+        )
 
     def with_guesser(self, fn: Guesser) -> "Model":
         """Return a new Model with `fn` appended to the guesser list."""
@@ -175,7 +207,9 @@ class Model:
         x: Any,
         y: Any,
         *,
-        backend: Literal["scipy.curve_fit", "scipy.minimize", "ultranest"] = "scipy.curve_fit",
+        backend: Literal[
+            "scipy.curve_fit", "scipy.minimize", "ultranest"
+        ] = "scipy.curve_fit",
         data_format: Optional[str] = None,
         parallel: Optional[Literal[None, "auto"]] = None,
         seed: Optional[Mapping[str, float]] = None,
@@ -189,7 +223,9 @@ class Model:
 
         # v1: only Gaussian inference (data_format None or 'normal')
         if data_format not in (None, "normal"):
-            raise NotImplementedError("v1 MVP supports only Gaussian default data inference.")
+            raise NotImplementedError(
+                "v1 MVP supports only Gaussian default data inference."
+            )
 
         datasets: List[Dict[str, Any]] = []
         batch_shape: Tuple[int, ...] = ()
@@ -239,7 +275,9 @@ class Model:
             si = ds["sigma"]
             si_arr = None if si is None else np.asarray(si, dtype=float)
 
-            p0_map = _compute_seed_map(self, xi, yi, free_names, rng=rng, user_seed=seed)
+            p0_map = _compute_seed_map(
+                self, xi, yi, free_names, rng=rng, user_seed=seed
+            )
             p0 = np.array([float(p0_map[n]) for n in free_names], dtype=float)
             bounds = _bounds_for_free(self.params, free_names)
 
@@ -260,7 +298,9 @@ class Model:
                 continue
 
             if backend != "scipy.curve_fit":
-                raise NotImplementedError("v1 MVP implements only backend='scipy.curve_fit'.")
+                raise NotImplementedError(
+                    "v1 MVP implements only backend='scipy.curve_fit'."
+                )
 
             f_wrapped = _wrap_free_params(self, fixed_map, free_names)
             r = fit_curve_fit(
@@ -371,13 +411,19 @@ class Model:
                 extra = {}
                 for d in self.derived:
                     dv = float(d.func(base))
-                    extra[d.name] = ParamView(name=d.name, value=dv, stderr=None, fixed=True, derived=True)
-                results = replace(results, params=ParamsView({**dict(results.params.items()), **extra}))
+                    extra[d.name] = ParamView(
+                        name=d.name, value=dv, stderr=None, fixed=True, derived=True
+                    )
+                results = replace(
+                    results,
+                    params=ParamsView({**dict(results.params.items()), **extra}),
+                )
             else:
                 # flatten again
                 batch_size = prod(results.batch_shape)
                 flat_vals = {
-                    n: np.asarray(results.params[n].value).reshape((batch_size,)) for n in self.param_names
+                    n: np.asarray(results.params[n].value).reshape((batch_size,))
+                    for n in self.param_names
                 }
                 extra_items = {}
                 for d in self.derived:
@@ -392,7 +438,10 @@ class Model:
                         fixed=True,
                         derived=True,
                     )
-                results = replace(results, params=ParamsView({**dict(results.params.items()), **extra_items}))
+                results = replace(
+                    results,
+                    params=ParamsView({**dict(results.params.items()), **extra_items}),
+                )
 
         run = Run(
             model=self,
@@ -400,8 +449,16 @@ class Model:
             backend=backend,
             data_format=(data_format or "normal"),
             data={"x": x, "y": y},
-            success=(successes[0] if batch_shape == () else unflatten_batch(np.asarray(successes, bool), batch_shape)),
-            message=(messages[0] if batch_shape == () else unflatten_batch(np.asarray(messages, object), batch_shape)),
+            success=(
+                successes[0]
+                if batch_shape == ()
+                else unflatten_batch(np.asarray(successes, bool), batch_shape)
+            ),
+            message=(
+                messages[0]
+                if batch_shape == ()
+                else unflatten_batch(np.asarray(messages, object), batch_shape)
+            ),
         )
 
         return run
@@ -414,7 +471,9 @@ def _spec_by_name(params: Tuple[ParameterSpec, ...], name: str) -> ParameterSpec
     raise KeyError(name)
 
 
-def _free_and_fixed(params: Tuple[ParameterSpec, ...]) -> Tuple[List[str], Dict[str, float]]:
+def _free_and_fixed(
+    params: Tuple[ParameterSpec, ...]
+) -> Tuple[List[str], Dict[str, float]]:
     free: List[str] = []
     fixed: Dict[str, float] = {}
     for p in params:
@@ -427,7 +486,9 @@ def _free_and_fixed(params: Tuple[ParameterSpec, ...]) -> Tuple[List[str], Dict[
     return free, fixed
 
 
-def _bounds_for_free(params: Tuple[ParameterSpec, ...], free_names: List[str]) -> Tuple[np.ndarray, np.ndarray]:
+def _bounds_for_free(
+    params: Tuple[ParameterSpec, ...], free_names: List[str]
+) -> Tuple[np.ndarray, np.ndarray]:
     pmap = {p.name: p for p in params}
     lo: List[float] = []
     hi: List[float] = []
@@ -534,7 +595,7 @@ def _compute_seed_map(
 
     free_names = list(free_names)
     pmap = {p.name: p for p in model.params}
-    
+
     # 2+3: model guesses + guessers
     seeds = _default_seed_engine(model, x, y, free_names)
 
@@ -582,4 +643,3 @@ def _compute_seed_map(
         )
 
     return seeds
-

@@ -91,14 +91,18 @@ def _jittered_cholesky(cov: np.ndarray, max_tries: int = 6) -> np.ndarray:
         try:
             return np.linalg.cholesky(cov + jitter * np.eye(cov.shape[0]))
         except np.linalg.LinAlgError:
-            jitter = (10.0 ** (-(max_tries - i))) * 1e-6 * scale + (jitter * 10.0 if jitter else 0.0)
+            jitter = (10.0 ** (-(max_tries - i))) * 1e-6 * scale + (
+                jitter * 10.0 if jitter else 0.0
+            )
 
     w, v = np.linalg.eigh(cov)
     w = np.clip(w, 0.0, None)
     return v @ np.diag(np.sqrt(w))
 
 
-def sample_mvn(mean: np.ndarray, cov: np.ndarray, nsamples: int, rng: np.random.Generator) -> np.ndarray:
+def sample_mvn(
+    mean: np.ndarray, cov: np.ndarray, nsamples: int, rng: np.random.Generator
+) -> np.ndarray:
     """Sample from MVN(mean, cov) robustly. Returns shape (nsamples, P)."""
     mean = np.asarray(mean, dtype=float)
     cov = np.asarray(cov, dtype=float)

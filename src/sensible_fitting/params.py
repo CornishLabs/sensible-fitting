@@ -11,7 +11,14 @@ except Exception:  # pragma: no cover - optional at import time
     unp = None
 
 
-__all__ = ["ParameterSpec", "DerivedSpec", "ParamView", "ParamsView", "MultiParamView", "GuessState"]
+__all__ = [
+    "ParameterSpec",
+    "DerivedSpec",
+    "ParamView",
+    "ParamsView",
+    "MultiParamView",
+    "GuessState",
+]
 
 
 @dataclass(frozen=True)
@@ -36,6 +43,7 @@ class DerivedSpec:
     - computed only AFTER fitting
     - depends only on fitted params, not on other derived params
     """
+
     name: str
     func: Any  # Callable[[Mapping[str, float]], float]
     doc: str = ""
@@ -44,6 +52,7 @@ class DerivedSpec:
 @dataclass(frozen=True)
 class ParamView:
     """A single parameter view."""
+
     name: str
     value: Any
     stderr: Any = None
@@ -85,6 +94,7 @@ class MultiParamView:
 
     value and stderr have shape batch_shape + (len(names),).
     """
+
     names: Tuple[str, ...]
     value: Any
     stderr: Any = None
@@ -111,7 +121,11 @@ class ParamsView(Mapping[str, ParamView]):
             return self._items[key]
 
         # Multi-param by names: ("frequency", "phase") or ["frequency", "phase"]
-        if isinstance(key, (tuple, list)) and key and all(isinstance(k, str) for k in key):
+        if (
+            isinstance(key, (tuple, list))
+            and key
+            and all(isinstance(k, str) for k in key)
+        ):
             names = tuple(key)
             return self._multi_by_names(names)
 
@@ -126,7 +140,11 @@ class ParamsView(Mapping[str, ParamView]):
             return self._multi_by_names(names)
 
         # Explicit indices -> MultiParamView
-        if isinstance(key, (tuple, list)) and key and all(isinstance(k, int) for k in key):
+        if (
+            isinstance(key, (tuple, list))
+            and key
+            and all(isinstance(k, int) for k in key)
+        ):
             names = tuple(self._names[i] for i in key)
             return self._multi_by_names(names)
 

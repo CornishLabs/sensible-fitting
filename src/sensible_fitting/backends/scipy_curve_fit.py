@@ -41,6 +41,10 @@ def fit_curve_fit(
             bounds=bounds,
             **kwargs,
         )
-        return CurveFitResult(popt=np.asarray(popt, float), pcov=pcov, success=True, message="ok")
+        return CurveFitResult(
+            popt=np.asarray(popt, float), pcov=pcov, success=True, message="ok"
+        )
     except Exception as e:
-        return CurveFitResult(popt=np.asarray(p0, float), pcov=None, success=False, message=str(e))
+        return CurveFitResult(
+            popt=np.asarray(p0, float), pcov=None, success=False, message=str(e)
+        )

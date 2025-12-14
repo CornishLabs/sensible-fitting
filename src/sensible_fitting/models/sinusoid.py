@@ -4,6 +4,7 @@ import numpy as np
 
 from ..model import Model
 
+
 def sinusoid_func(x, amplitude, offset, frequency, phase):
     """Module-level sinusoid: offset + amplitude * sin(2π f x + phase)."""
     return offset + amplitude * np.sin(2 * np.pi * frequency * x + phase)
