@@ -83,7 +83,7 @@ def prepare_datasets(
         k = np.asarray(k, dtype=float)
 
         if k.ndim == 1:
-            y_seed = _safe_frac(n, k)
+            y_seed = _safe_frac(k, n)
             datasets.append(
                 Dataset(
                     x=x,
@@ -113,7 +113,7 @@ def prepare_datasets(
                     x=x,
                     format="binomial",
                     payload={"n": ni, "k": ki},
-                    y_for_seed=_safe_frac(ni, ki),
+                    y_for_seed=_safe_frac(ki, ni),
                 )
             )
 
@@ -165,7 +165,7 @@ def _one_dataset(x: Any, data: Any, fmt: str) -> Dataset:
 
     if fmt == "binomial":
         n, k = _infer_binomial_payload(data)
-        y_seed = _safe_frac(n, k)
+        y_seed = _safe_frac(k, n)
         return Dataset(x=x, format="binomial", payload={"n": n, "k": k}, y_for_seed=y_seed)
 
     a, b = _infer_beta_payload(data)

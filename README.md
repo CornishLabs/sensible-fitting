@@ -28,7 +28,7 @@ Currently intended for development / source installs:
 
 ```bash
 pip install -e .
-````
+```
 
 Dependencies are listed in `pyproject.toml`.
 
@@ -44,8 +44,10 @@ from sensible_fitting import Model
 def line(x, m, b):
     return m * x + b
 
-model = Model.from_function(line, name="straight line")
-             .bound(m=(-10, 10), b=(-10, 10))
+model = (
+    Model.from_function(line, name="straight line")
+    .bound(m=(-10, 10), b=(-10, 10))
+)
 
 rng = np.random.default_rng(0)
 x = np.linspace(0, 10, 20)
@@ -131,11 +133,18 @@ run = model.fit(x, (y, sigma), seed_override={"frequency": 3.0})
 
 ## Data formats
 
-For v1, the supported payloads are Gaussian-style:
+v1 supports these `data_format` payloads:
 
+### `data_format="normal"` (default)
 * `y` → unweighted least squares
 * `(y, sigma)` → absolute symmetric errors
 * `(y, sigma_low, sigma_high)` → asymmetric errors (currently approximated to mean sigma)
+
+### `data_format="binomial"`
+* `(n_samples, n_successes)`
+
+### `data_format="beta"`
+* `(alpha, beta)`
 
 ---
 
@@ -190,9 +199,11 @@ gaus = models.gaussian_with_offset()
 
 v1 implements:
 
-* `backend="scipy.curve_fit"` (default)
+* `backend="scipy.curve_fit"` (default for `data_format="normal"`)
+* `backend="scipy.minimize"` (required for `binomial`/`beta` currently)
+* `backend="ultranest"` (Bayesian nested sampling for `normal`)
 
-The API is designed to support additional backends (e.g. SciPy minimisers, UltraNest), but those are not wired up yet.
+UltraNest requires either explicit priors (`Model.prior(...)`) or finite bounds for all free parameters.
 
 ---
 

@@ -32,7 +32,7 @@ x = np.linspace(0, 1, N)
 true_params = dict(amplitude=2.0, offset=0.1, frequency=3.2, phase=0.3)
 sigma = 0.25
 
-y_clean = models.sinusoid_func(x, **true_params)
+y_clean = model.eval(x, **true_params)
 y = y_clean + rng.normal(0, sigma, size=x.size)
 
 # --- 1) Use Model.seed(...) to look at the seed curve ------------------------
@@ -93,7 +93,7 @@ fig, ax = plt.subplots(figsize=(8, 5))
 ax.errorbar(x, y, yerr=sigma, fmt="o", ms=3, capsize=2, label="data")
 
 # true underlying curve (for illustration)
-ax.plot(xg, models.sinusoid_func(xg, **true_params), "k:", label="true")
+ax.plot(xg, model.eval(xg, **true_params), "k:", label="true")
 
 # seed-only curve (from seed engine + guesser)
 ax.plot(xg, y_seed, "--", label="seed curve")

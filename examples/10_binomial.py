@@ -35,6 +35,10 @@ run = model.fit(
     (n, k),
     data_format="binomial",
     backend="scipy.minimize",
+    # backend_options={
+    #     "method": "L-BFGS-B",
+    #     "options": {"maxiter": 2000},
+    # },
 ).squeeze()
 
 res = run.results
