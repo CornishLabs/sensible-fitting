@@ -1,96 +1,109 @@
-from __future__ import annotations
+from typing import Any, Dict, Optional, Tuple
+import numpy as np 
+from ..inference import build_gaussian_loglike, build_prior_transform
+from .common import BackendResult
 
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+class UltraNestBackend:
+    name = "ultranest"
 
-import numpy as np
+    def fit_one(
+        self,
+        *,
+        model: Any,
+        dataset: Any,
+        free_names: list[str],
+        fixed_map: dict[str, float],
+        p0: np.ndarray,
+        bounds: Tuple[np.ndarray, np.ndarray],
+        options: dict[str, Any],
+    ) -> BackendResult:
+        if getattr(dataset, "format", None) != "normal":
+            raise NotImplementedError("ultranest backend supports only data_format='normal'.")
 
+        payload: Dict[str, Any] = dict(getattr(dataset, "payload"))
+        x = getattr(dataset, "x")
+        y = np.asarray(payload["y"], dtype=float)
+        sigma = payload.get("sigma", None)
+        sigma_arr = None if sigma is None else np.asarray(sigma, dtype=float)
 
-@dataclass(frozen=True)
-class UltraNestResult:
-    mean: np.ndarray                 # posterior mean (free params)
-    stdev: Optional[np.ndarray]      # posterior stdev (free params)
-    cov: Optional[np.ndarray]        # posterior covariance (free params)
-    success: bool
-    message: str = ""
-    stats: Dict[str, Any] | None = None
+        # Backend options parsing/merging lives HERE (not in Model.fit).
+        backend_options = dict(options or {})
+        vectorized = bool(backend_options.pop("vectorized", False))
+        log_dir = backend_options.pop("log_dir", None)
+        resume = backend_options.pop("resume", "subfolder")
+        sampler_kwargs = dict(backend_options.pop("sampler_kwargs", {}) or {})
+        run_kwargs = dict(backend_options.pop("run_kwargs", {}) or {})
 
+        # Any leftover keys get treated as UltraNest run() kwargs, unless already set.
+        for k, v in list(backend_options.items()):
+            run_kwargs.setdefault(k, v)
 
-def fit_ultranest(
-    *,
-    param_names: list[str],
-    loglike: Callable[[np.ndarray], Any],
-    transform: Callable[[np.ndarray], Any],
-    wrapped_params: Optional[list[bool]] = None,
-    log_dir: Optional[str] = None,
-    resume: Any = "subfolder",
-    sampler_kwargs: Optional[Dict[str, Any]] = None,
-    run_kwargs: Optional[Dict[str, Any]] = None,
-    fallback_theta: Optional[np.ndarray] = None,
-) -> UltraNestResult:
-    """
-    Thin wrapper around ultranest.ReactiveNestedSampler for sensible-fitting.
-    Returns posterior mean/stdev/cov as "fit-like" outputs, plus raw stats.
-    """
-    sampler_kwargs = dict(sampler_kwargs or {})
-    run_kwargs = dict(run_kwargs or {})
+        sampler_kwargs.setdefault("vectorized", vectorized)
 
-    if fallback_theta is None:
-        fallback_theta = np.full((len(param_names),), np.nan, dtype=float)
-    else:
-        fallback_theta = np.asarray(fallback_theta, dtype=float)
+        wrapped_params = [
+            bool(getattr(spec, "wrapped", False))
+            for spec in getattr(model, "params")
+            if spec.name in free_names
+        ]
 
-    try:
-        import ultranest  # local import (optional dependency)
-
-        sampler = ultranest.ReactiveNestedSampler(
-            param_names,
-            loglike,
-            transform=transform,
-            wrapped_params=wrapped_params,
-            log_dir=log_dir,
-            resume=resume,
-            **sampler_kwargs,
+        transform = build_prior_transform(getattr(model, "params"), free_names)
+        loglike = build_gaussian_loglike(
+            model=model,
+            x=x,
+            y=y,
+            sigma=sigma_arr,
+            fixed_map=fixed_map,
+            free_names=free_names,
+            vectorized=vectorized,
         )
 
-        result = sampler.run(**run_kwargs)
+        fallback_theta = np.asarray(p0, dtype=float)
 
-        samples = np.asarray(result.get("samples", []), dtype=float)
-        if samples.ndim != 2 or samples.shape[1] != len(param_names) or samples.shape[0] == 0:
-            # Fallback to something usable even if sampling produced no samples
-            mean = fallback_theta
-            stdev = None
-            cov = None
-        else:
-            mean = samples.mean(axis=0)
-            stdev = samples.std(axis=0, ddof=1) if samples.shape[0] >= 2 else None
-            cov = np.cov(samples.T, ddof=1) if samples.shape[0] >= 2 else None
+        try:
+            import ultranest  # local import (optional dependency)
 
-        stats: Dict[str, Any] = {
-            "backend": "ultranest",
-            "free_names": tuple(param_names),
-            "logz": float(result.get("logz", np.nan)),
-            "logzerr": float(result.get("logzerr", np.nan)),
-            "posterior_samples": samples,
-            "ultranest_result": result,
-        }
+            sampler = ultranest.ReactiveNestedSampler(
+                list(free_names),
+                loglike,
+                transform=transform,
+                wrapped_params=wrapped_params,
+                log_dir=log_dir,
+                resume=resume,
+                **sampler_kwargs,
+            )
 
-        return UltraNestResult(
-            mean=np.asarray(mean, dtype=float),
-            stdev=None if stdev is None else np.asarray(stdev, dtype=float),
-            cov=None if cov is None else np.asarray(cov, dtype=float),
-            success=True,
-            message="ok",
-            stats=stats,
-        )
+            result = sampler.run(**run_kwargs)
 
-    except Exception as e:
-        # Be conservative: fail "softly" and return the fallback point.
-        return UltraNestResult(
-            mean=np.asarray(fallback_theta, dtype=float),
-            stdev=None,
-            cov=None,
-            success=False,
-            message=str(e),
-            stats={"backend": "ultranest", "error": str(e), "free_names": tuple(param_names)},
-        )
+            samples = np.asarray(result.get("samples", []), dtype=float)
+            if samples.ndim != 2 or samples.shape[1] != len(free_names) or samples.shape[0] == 0:
+                mean = fallback_theta
+                cov = None
+            else:
+                mean = samples.mean(axis=0)
+                cov = np.cov(samples.T, ddof=1) if samples.shape[0] >= 2 else None
+
+            stats: Dict[str, Any] = {
+                "backend": "ultranest",
+                "free_names": tuple(free_names),
+                "logz": float(result.get("logz", np.nan)),
+                "logzerr": float(result.get("logzerr", np.nan)),
+                "posterior_samples": samples,
+                "ultranest_result": result,
+            }
+
+            return BackendResult(
+                theta=np.asarray(mean, dtype=float),
+                cov=None if cov is None else np.asarray(cov, dtype=float),
+                success=True,
+                message="ok",
+                stats=stats,
+            )
+
+        except Exception as e:
+            return BackendResult(
+                theta=np.asarray(fallback_theta, dtype=float),
+                cov=None,
+                success=False,
+                message=str(e),
+                stats={"backend": "ultranest", "error": str(e), "free_names": tuple(free_names)},
+            )

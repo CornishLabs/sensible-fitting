@@ -14,19 +14,15 @@ from typing import (
     Tuple,
 )
 
-
 import numpy as np
-from scipy.special import gammaln
+from warnings import warn
 
-from .backends.scipy_curve_fit import fit_curve_fit
-from .backends.scipy_minimize import fit_minimize
-from .backends.ultranest_backend import fit_ultranest
+from .backends import get_backend
+from .data import Dataset, prepare_datasets
 from .params import DerivedSpec, GuessState, ParameterSpec, ParamView, ParamsView
 from .run import Results, Run
 from .util import (
-    flatten_batch,
     infer_param_names,
-    is_ragged_batch,
     prod,
     unflatten_batch,
 )
@@ -241,320 +237,112 @@ class Model:
     ) -> Run:
         if rng is None:
             rng = np.random.default_rng()
-        backend_options = backend_options or {}
+        backend_options = dict(backend_options or {})
 
-        # v1: supported data formats (payload + implied objective)
         if data_format is None:
             data_format = "normal"
-        if data_format not in ("normal", "binomial", "beta"):
-            raise NotImplementedError(
-                "v1 supports data_format in {'normal', 'binomial', 'beta'}."
-            )
 
-        # If user didn't override backend and they asked for non-Gaussian, switch to minimize.
+        # Automatic backend switching for non-Gaussian (old default behaviour).
         if data_format in ("binomial", "beta") and backend == "scipy.curve_fit":
             backend = "scipy.minimize"
 
-        datasets: List[Dict[str, Any]] = []
-        batch_shape: Tuple[int, ...] = ()
+        # Enforce current capability boundaries clearly.
+        if data_format in ("binomial", "beta") and backend != "scipy.minimize":
+            raise NotImplementedError(
+                "v1: non-Gaussian data currently requires backend='scipy.minimize'."
+            )
 
-        if is_ragged_batch(x, data):
-            for xi, di in zip(x, data):
-                if data_format == "normal":
-                    yobs, sigma = _infer_gaussian_payload(di)
-                    datasets.append(
-                        {"x": xi, "format": "normal", "y": yobs, "sigma": sigma}
-                    )
-                elif data_format == "binomial":
-                    n, k = _infer_binomial_payload(di)
-                    datasets.append({"x": xi, "format": "binomial", "n": n, "k": k})
-                else:  # beta
-                    a, b = _infer_beta_payload(di)
-                    datasets.append({"x": xi, "format": "beta", "alpha": a, "beta": b})
-            batch_shape = (len(datasets),)
-        else:
-            if data_format == "normal":
-                yobs, sigma = _infer_gaussian_payload(data)
-                yobs = np.asarray(yobs)
-                if yobs.ndim == 1:
-                    datasets.append(
-                        {"x": x, "format": "normal", "y": yobs, "sigma": sigma}
-                    )
-                    batch_shape = ()
-                else:
-                    yflat, batch_shape = flatten_batch(yobs)
-                    # broadcast sigma if needed
-                    if sigma is None:
-                        sflat = [None] * yflat.shape[0]
-                    else:
-                        sarr = np.asarray(sigma)
-                        if sarr.shape == ():
-                            sflat = [float(sarr)] * yflat.shape[0]
-                        else:
-                            sb = np.broadcast_to(sarr, yobs.shape)
-                            sb_flat, _ = flatten_batch(sb)
-                            sflat = [sb_flat[i] for i in range(sb_flat.shape[0])]
-                    for i in range(yflat.shape[0]):
-                        datasets.append(
-                            {
-                                "x": x,
-                                "format": "normal",
-                                "y": yflat[i],
-                                "sigma": sflat[i],
-                            }
-                        )
-            elif data_format == "binomial":
-                n, k = _infer_binomial_payload(data)
-                k = np.asarray(k, dtype=float)
-                if k.ndim == 1:
-                    datasets.append({"x": x, "format": "binomial", "n": n, "k": k})
-                    batch_shape = ()
-                else:
-                    kflat, batch_shape = flatten_batch(k)
-                    n_arr = np.asarray(n, dtype=float)
-                    if n_arr.shape == ():
-                        nflat = [float(n_arr)] * kflat.shape[0]
-                    else:
-                        nb = np.broadcast_to(n_arr, k.shape)
-                        nb_flat, _ = flatten_batch(nb)
-                        nflat = [nb_flat[i] for i in range(nb_flat.shape[0])]
-                    for i in range(kflat.shape[0]):
-                        datasets.append(
-                            {"x": x, "format": "binomial", "n": nflat[i], "k": kflat[i]}
-                        )
-            else:  # beta
-                a, b = _infer_beta_payload(data)
-                a = np.asarray(a, dtype=float)
-                b = np.asarray(b, dtype=float)
-                if a.ndim == 1:
-                    datasets.append({"x": x, "format": "beta", "alpha": a, "beta": b})
-                    batch_shape = ()
-                else:
-                    aflat, batch_shape = flatten_batch(a)
-                    bb = np.broadcast_to(b, a.shape)
-                    bflat, _ = flatten_batch(bb)
-                    for i in range(aflat.shape[0]):
-                        datasets.append(
-                            {
-                                "x": x,
-                                "format": "beta",
-                                "alpha": aflat[i],
-                                "beta": bflat[i],
-                            }
-                        )
+        datasets, batch_shape = prepare_datasets(x, data, data_format)
 
         free_names, fixed_map = _free_and_fixed(self.params)
 
-        # allocate storage (flattened batch)
+        backend_impl = get_backend(backend)
+
+        # Allocate storage in flattened-batch form
         B = len(datasets)
         values = {n: np.empty((B,), dtype=float) for n in self.param_names}
-        errors = {n: np.full((B,), np.nan, dtype=float) for n in self.param_names}
         seed_values = {n: np.empty((B,), dtype=float) for n in self.param_names}
-        covs: List[Optional[np.ndarray]] = []
+        errors = {n: np.empty((B,), dtype=object) for n in self.param_names}
+        for n in self.param_names:
+            errors[n][:] = None
 
-        successes: List[bool] = []
-        messages: List[str] = []
-        # For Bayesian backends, store per-dataset extra stats (may be dicts).
-        stats_list: List[Dict[str, Any]] = []
+        covs = np.empty((B,), dtype=object)
+        covs[:] = None
+        successes = np.empty((B,), dtype=bool)
+        messages = np.empty((B,), dtype=object)
+        stats_list = np.empty((B,), dtype=object)
+        stats_list[:] = None
 
         for i, ds in enumerate(datasets):
-            xi = ds["x"]
-            fmt = ds.get("format", data_format)
-
-            # ---- "to-y" summary for seed guessers ------------------------------
-            if fmt == "normal":
-                yi = np.asarray(ds["y"])
-                si = ds["sigma"]
-                si_arr = None if si is None else np.asarray(si, dtype=float)
-                y_for_seed = yi
-            elif fmt == "binomial":
-                n_i = np.asarray(ds["n"], dtype=float)
-                k_i = np.asarray(ds["k"], dtype=float)
-                # For binomial, guessers usually want something y-like.
-                # Feed the observed fraction k/n (safe for n=0).
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    frac = np.where(n_i > 0, k_i / n_i, 0.0)
-                y_for_seed = frac
-            else:  # beta
-                a_i = np.asarray(ds["alpha"], dtype=float)
-                b_i = np.asarray(ds["beta"], dtype=float)
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    y_for_seed = np.where((a_i + b_i) > 0, a_i / (a_i + b_i), 0.0)
-
             p0_map = _compute_seed_map(
                 self,
-                xi,
-                np.asarray(y_for_seed, dtype=float),
+                ds.x,
+                np.asarray(ds.y_for_seed, dtype=float),
                 free_names,
                 rng=rng,
                 seed_override=seed_override,
             )
-            p0 = np.array([float(p0_map[n]) for n in free_names], dtype=float)
+            p0 = np.asarray([float(p0_map[n]) for n in free_names], dtype=float)
             bounds = _bounds_for_free(self.params, free_names)
 
-            # Record the seed params actually used for this dataset
+            # Record seed used
             for j, n in enumerate(free_names):
-                seed_values[n][i] = p0[j]
+                seed_values[n][i] = float(p0[j])
             for n, fv in fixed_map.items():
                 seed_values[n][i] = float(fv)
 
             if not optimise:
-                successes.append(True)
-                messages.append("optimise=False (seed only)")
+                successes[i] = True
+                messages[i] = "optimise=False (seed only)"
+                stats_list[i] = {}
                 for j, n in enumerate(free_names):
-                    values[n][i] = p0[j]
+                    values[n][i] = float(p0[j])
                 for n, fv in fixed_map.items():
                     values[n][i] = float(fv)
-                covs.append(None)
+                covs[i] = None
                 continue
 
-            if fmt == "normal":
-                if backend == "scipy.curve_fit":
-                    f_wrapped = _wrap_free_params(self, fixed_map, free_names)
-                    r = fit_curve_fit(
-                        f_wrapped,
-                        xi,
-                        yi,
-                        sigma=si_arr,
-                        p0=p0,
-                        bounds=bounds,
-                        maxfev=backend_options.get("maxfev"),
-                    )
-                    successes.append(bool(r.success))
-                    messages.append(str(r.message))
-                    stats_list.append({})
+            r = backend_impl.fit_one(
+                model=self,
+                dataset=ds,
+                free_names=free_names,
+                fixed_map=fixed_map,
+                p0=p0,
+                bounds=bounds,
+                options=backend_options,
+            )
 
-                    for j, n in enumerate(free_names):
-                        values[n][i] = r.popt[j]
-                    for n, fv in fixed_map.items():
-                        values[n][i] = float(fv)
+            successes[i] = bool(r.success)
+            messages[i] = str(r.message)
+            stats_list[i] = dict(r.stats or {})
 
-                    if r.pcov is not None:
-                        pcov = np.asarray(r.pcov, dtype=float)
-                        covs.append(pcov)
-                        perr = np.sqrt(np.clip(np.diag(pcov), 0.0, np.inf))
-                        for j, n in enumerate(free_names):
-                            errors[n][i] = perr[j]
-                    else:
-                        covs.append(None)
+            theta = np.asarray(r.theta, dtype=float)
+            for j, n in enumerate(free_names):
+                values[n][i] = float(theta[j])
+            for n, fv in fixed_map.items():
+                values[n][i] = float(fv)
 
-                elif backend == "ultranest":
-                    # Build prior transform (unit cube -> physical params) and loglike.
-                    transform = _build_prior_transform(self.params, free_names)
-                    loglike = _build_gaussian_loglike(
-                        model=self,
-                        x=xi,
-                        y=yi,
-                        sigma=si_arr,
-                        fixed_map=fixed_map,
-                        free_names=free_names,
-                        vectorized=bool(backend_options.get("vectorized", False)),
-                    )
-
-                    wrapped_params = [
-                        bool(_spec_by_name(self.params, n).wrapped) for n in free_names
-                    ]
-
-                    reserved = {"log_dir", "resume", "sampler_kwargs", "run_kwargs", "vectorized"}
-                    run_kwargs = dict(backend_options.get("run_kwargs", {}) or {})
-                    # Convenience: allow passing UltraNest run() kwargs directly in backend_options.
-                    for k, v in backend_options.items():
-                        if k in reserved:
-                            continue
-                        run_kwargs.setdefault(k, v)
-
-                    sampler_kwargs = dict(backend_options.get("sampler_kwargs", {}) or {})
-                    # Keep sampler kwargs aligned with our vectorization choice.
-                    sampler_kwargs.setdefault("vectorized", bool(backend_options.get("vectorized", False)))
-
-                    r = fit_ultranest(
-                        param_names=list(free_names),
-                        loglike=loglike,
-                        transform=transform,
-                        wrapped_params=wrapped_params,
-                        log_dir=backend_options.get("log_dir"),
-                        resume=backend_options.get("resume", "subfolder"),
-                        sampler_kwargs=sampler_kwargs,
-                        run_kwargs=run_kwargs,
-                        fallback_theta=p0,
-                    )
-
-                    successes.append(bool(r.success))
-                    messages.append(str(r.message))
-                    stats_list.append(r.stats or {})
-
-                    for j, n in enumerate(free_names):
-                        values[n][i] = r.mean[j]
-                    for n, fv in fixed_map.items():
-                        values[n][i] = float(fv)
-
-                    covs.append(r.cov)
-                    if r.stdev is not None:
-                        for j, n in enumerate(free_names):
-                            errors[n][i] = float(r.stdev[j])
-
-                else:
-                    raise NotImplementedError(
-                        "v1: normal data supports backend in {'scipy.curve_fit', 'ultranest'}."
-                    )
-            else:
-                if backend != "scipy.minimize":
-                    raise NotImplementedError(
-                        "v1: non-Gaussian data currently uses backend='scipy.minimize'."
-                    )
-
-                def objective(theta_free: np.ndarray) -> float:
-                    kwargs = dict(fixed_map)
-                    for j, name in enumerate(free_names):
-                        kwargs[name] = float(theta_free[j])
-                    p = np.asarray(self.eval(xi, **kwargs), dtype=float)
-                    if fmt == "binomial":
-                        p = np.broadcast_to(p, np.asarray(k_i).shape)
-                        return _neg_loglike_binomial(p, n_i, k_i)
-                    else:  # beta
-                        p = np.broadcast_to(p, np.asarray(a_i).shape)
-                        return _neg_loglike_beta(p, a_i, b_i)
-
-                r = fit_minimize(
-                    objective,
-                    p0,
-                    bounds,
-                    method=str(backend_options.get("method", "L-BFGS-B")),
-                    options=backend_options.get("options"),
-                )
-                successes.append(bool(r.success))
-                messages.append(str(r.message))
-
+            covs[i] = r.cov
+            if r.cov is not None:
+                pcov = np.asarray(r.cov, dtype=float)
+                perr = np.sqrt(np.clip(np.diag(pcov), 0.0, np.inf))
                 for j, n in enumerate(free_names):
-                    values[n][i] = r.xopt[j]
-                for n, fv in fixed_map.items():
-                    values[n][i] = float(fv)
-
-                if r.cov is not None:
-                    pcov = np.asarray(r.cov, dtype=float)
-                    covs.append(pcov)
-                    perr = np.sqrt(np.clip(np.diag(pcov), 0.0, np.inf))
-                    for j, n in enumerate(free_names):
-                        errors[n][i] = perr[j]
-                else:
-                    covs.append(None)
-                stats_list.append({})
-
-        have_any_cov = any(c is not None for c in covs)
+                    errors[n][i] = float(perr[j])
 
         # Build param views + cov
         if batch_shape == ():
             items: Dict[str, ParamView] = {}
             seed_items: Dict[str, ParamView] = {}
+            cov0 = covs[0] if covs.shape[0] else None
             for n in self.param_names:
                 spec = _spec_by_name(self.params, n)
                 v = float(values[n][0])
-                e = float(errors[n][0])
                 sv = float(seed_values[n][0])
+                e = errors[n][0]
                 items[n] = ParamView(
                     name=n,
                     value=v,
-                    stderr=None if (spec.fixed or not have_any_cov) else e,
+                    stderr=None if (spec.fixed or cov0 is None) else float(e),
                     fixed=spec.fixed,
                     bounds=spec.bounds,
                     derived=False,
@@ -567,27 +355,28 @@ class Model:
                     bounds=spec.bounds,
                     derived=False,
                 )
-            cov = covs[0] if covs and covs[0] is not None else None
+            cov = None if cov0 is None else np.asarray(cov0, dtype=float)
             results = Results(
                 batch_shape=(),
                 params=ParamsView(items),
                 seed=ParamsView(seed_items),
                 cov=cov,
                 backend=backend,
-                stats=(stats_list[0] if stats_list else {}),
+                stats=(dict(stats_list[0]) if stats_list[0] is not None else {}),
             )
         else:
             items = {}
             seed_items = {}
+            cov_obj = unflatten_batch(np.asarray(covs, dtype=object), batch_shape)
             for n in self.param_names:
                 spec = _spec_by_name(self.params, n)
                 v = unflatten_batch(values[n], batch_shape)
-                e = unflatten_batch(errors[n], batch_shape)
+                e = unflatten_batch(np.asarray(errors[n], dtype=object), batch_shape)
                 sv = unflatten_batch(seed_values[n], batch_shape)
                 items[n] = ParamView(
                     name=n,
                     value=v,
-                    stderr=None if (spec.fixed or not have_any_cov) else e,
+                    stderr=None if spec.fixed else e,
                     fixed=spec.fixed,
                     bounds=spec.bounds,
                     derived=False,
@@ -600,27 +389,14 @@ class Model:
                     bounds=spec.bounds,
                     derived=False,
                 )
-
-            if all(c is not None for c in covs):
-                cov = np.stack([c for c in covs], axis=0)
-                cov = unflatten_batch(cov, batch_shape)
-            else:
-                cov = None
-
-            # If we have per-dataset stats (e.g. UltraNest), store them as an object array
-            # carrying the batch dims so Results slicing can pick the right element.
-            stats: Dict[str, Any] = {}
-            if stats_list:
-                stats["per_batch"] = unflatten_batch(
-                    np.asarray(stats_list, dtype=object), batch_shape
-                )
-
-
+            stats: Dict[str, Any] = {
+                "per_batch": unflatten_batch(np.asarray(stats_list, dtype=object), batch_shape)
+            }
             results = Results(
                 batch_shape=batch_shape,
                 params=ParamsView(items),
                 seed=ParamsView(seed_items),
-                cov=cov,
+                cov=cov_obj,  # object array, per-batch cov matrices (or None)
                 backend=backend,
                 stats=stats,
             )
@@ -671,14 +447,14 @@ class Model:
             data_format=data_format,
             data={"x": x, "data": data},
             success=(
-                successes[0]
+                bool(successes[0])
                 if batch_shape == ()
-                else unflatten_batch(np.asarray(successes, bool), batch_shape)
+                else unflatten_batch(np.asarray(successes, dtype=bool), batch_shape)
             ),
             message=(
-                messages[0]
+                str(messages[0])
                 if batch_shape == ()
-                else unflatten_batch(np.asarray(messages, object), batch_shape)
+                else unflatten_batch(np.asarray(messages, dtype=object), batch_shape)
             ),
         )
 
@@ -722,111 +498,6 @@ def _bounds_for_free(
             lo.append(-np.inf if b[0] is None else float(b[0]))
             hi.append(np.inf if b[1] is None else float(b[1]))
     return (np.array(lo, dtype=float), np.array(hi, dtype=float))
-
-
-def _wrap_free_params(model: Model, fixed_map: Dict[str, float], free_names: List[str]):
-    def f(x, *theta_free):
-        kwargs = dict(fixed_map)
-        for j, n in enumerate(free_names):
-            kwargs[n] = theta_free[j]
-        return model.eval(x, **kwargs)
-
-    return f
-
-
-def _infer_gaussian_payload(y: Any):
-    # v1 default inference:
-    # y -> unweighted
-    # (y, yerr) -> symmetric absolute errors
-    # (y, yerr_low, yerr_high) -> asymmetric; approximate to mean sigma for curve_fit
-    if isinstance(y, (tuple, list)) and len(y) == 2:
-        yobs, yerr = y
-        return np.asarray(yobs), yerr
-    if isinstance(y, (tuple, list)) and len(y) == 3:
-        yobs, ylo, yhi = y
-        sigma = 0.5 * (np.asarray(ylo) + np.asarray(yhi))
-        return np.asarray(yobs), sigma
-    return np.asarray(y), None
-
-
-def _infer_binomial_payload(y: Any):
-    """Parse binomial payload y=(n_samples, n_successes)."""
-    if not (isinstance(y, (tuple, list)) and len(y) == 2):
-        raise TypeError("binomial data expects y=(n_samples, n_successes).")
-
-    n, k = y
-    n = np.asarray(n, dtype=float)
-    k = np.asarray(k, dtype=float)
-
-    # allow scalar n broadcast
-    if n.shape == () and k.shape != ():
-        n = np.broadcast_to(n, k.shape)
-
-    if n.shape != k.shape:
-        raise ValueError(f"n_samples shape {n.shape} != n_successes shape {k.shape}")
-
-    if np.any(k < 0) or np.any(n < 0) or np.any(k > n):
-        raise ValueError(
-            "Invalid binomial data: require 0 <= n_successes <= n_samples."
-        )
-
-    return n, k
-
-
-def _infer_beta_payload(data: Any):
-    """Parse beta payload data=(alpha, beta)."""
-    if not (isinstance(data, (tuple, list)) and len(data) == 2):
-        raise TypeError("beta data expects data=(alpha, beta).")
-
-    a, b = data
-    a = np.asarray(a, dtype=float)
-    b = np.asarray(b, dtype=float)
-
-    # allow scalar broadcast
-    if a.shape == () and b.shape != ():
-        a = np.broadcast_to(a, b.shape)
-    if b.shape == () and a.shape != ():
-        b = np.broadcast_to(b, a.shape)
-
-    if a.shape != b.shape:
-        raise ValueError(f"alpha shape {a.shape} != beta shape {b.shape}")
-
-    if np.any(a <= 0) or np.any(b <= 0):
-        raise ValueError("Invalid beta data: require alpha > 0 and beta > 0.")
-
-    return a, b
-
-
-def _neg_loglike_binomial(p: np.ndarray, n: np.ndarray, k: np.ndarray) -> float:
-    """Negative log-likelihood for Binomial(n, p) with stability clamping."""
-    p = np.asarray(p, dtype=float)
-    n = np.asarray(n, dtype=float)
-    k = np.asarray(k, dtype=float)
-
-    eps = 1e-12
-    p = np.clip(p, eps, 1.0 - eps)
-
-    # log Binomial PMF: log C(n,k) + k log p + (n-k) log(1-p)
-    # Keeping logC doesn't change the optimum, but is the true log_prob.
-    logC = gammaln(n + 1.0) - gammaln(k + 1.0) - gammaln((n - k) + 1.0)
-    ll = logC + k * np.log(p) + (n - k) * np.log(1.0 - p)
-    return float(-np.sum(ll))
-
-
-def _neg_loglike_beta(p: np.ndarray, alpha: np.ndarray, beta_: np.ndarray) -> float:
-    """Negative log-likelihood for Beta(alpha, beta) evaluated at p, with stability clamping."""
-    p = np.asarray(p, dtype=float)
-    alpha = np.asarray(alpha, dtype=float)
-    beta_ = np.asarray(beta_, dtype=float)
-
-    eps = 1e-12
-    p = np.clip(p, eps, 1.0 - eps)
-
-    # log Beta PDF: (a-1)log p + (b-1)log(1-p) - logB(a,b)
-    # logB(a,b) = gammaln(a) + gammaln(b) - gammaln(a+b)
-    log_norm = gammaln(alpha + beta_) - gammaln(alpha) - gammaln(beta_)
-    ll = (alpha - 1.0) * np.log(p) + (beta_ - 1.0) * np.log(1.0 - p) + log_norm
-    return float(-np.sum(ll))
 
 
 def _default_seed_engine(
@@ -892,8 +563,6 @@ def _compute_seed_map(
       5) midpoint of finite bounds (with a warning)
       6) else: raise ValueError
     """
-    from warnings import warn
-
     free_names = list(free_names)
     pmap = {p.name: p for p in model.params}
 
@@ -934,6 +603,28 @@ def _compute_seed_map(
             UserWarning,
         )
 
+    # Clip any out-of-bounds seeds into the feasible range (saves lots of backend pain).
+    clipped: List[str] = []
+    for n in free_names:
+        if n not in seeds:
+            continue
+        b = pmap[n].bounds
+        if b is None:
+            continue
+        lo, hi = b
+        v = float(seeds[n])
+        v0 = v
+        if lo is not None and np.isfinite(lo):
+            v = max(v, float(lo))
+        if hi is not None and np.isfinite(hi):
+            v = min(v, float(hi))
+        if v != v0:
+            seeds[n] = v
+            clipped.append(n)
+    if clipped:
+        warn("Clipped seed values into bounds for: " + ", ".join(clipped), UserWarning)
+
+
     # 5) final check
     missing = [n for n in free_names if n not in seeds]
     if missing:
@@ -944,168 +635,3 @@ def _compute_seed_map(
         )
 
     return seeds
-
-def _build_prior_transform(
-    params: Tuple[ParameterSpec, ...], free_names: List[str]
-) -> Any:
-    """
-    Build an UltraNest-style prior transform: cube in [0,1]^P -> physical params.
-    Uses ParameterSpec.prior if present; otherwise defaults to Uniform(bounds).
-
-    Supported priors (v1):
-      - ('uniform', lo, hi) or no-args + finite bounds
-      - ('loguniform', lo, hi)  (lo>0, hi>0)
-      - ('normal', mean, sigma) (optionally truncated if finite bounds are set)
-    """
-    import scipy.stats
-
-    pmap = {p.name: p for p in params}
-
-    transforms = []
-    for name in free_names:
-        spec = pmap[name]
-        prior = spec.prior
-        bounds = spec.bounds
-
-        kind = None
-        args: Tuple[Any, ...] = ()
-        if prior is not None:
-            kind, args = prior
-            kind = str(kind).lower()
-
-        def _require_finite_bounds(n: str) -> tuple[float, float]:
-            if bounds is None or bounds[0] is None or bounds[1] is None:
-                raise ValueError(
-                    f"UltraNest needs a proper prior for {n!r}. "
-                    f"Either set .prior({n}=...) or finite bounds via .bound({n}=(lo,hi))."
-                )
-            lo, hi = float(bounds[0]), float(bounds[1])
-            if not (np.isfinite(lo) and np.isfinite(hi) and lo < hi):
-                raise ValueError(f"Bounds for {n!r} must be finite and lo < hi for UltraNest.")
-            return lo, hi
-
-        if kind is None or kind == "uniform":
-            if len(args) >= 2:
-                lo, hi = float(args[0]), float(args[1])
-            else:
-                lo, hi = _require_finite_bounds(name)
-
-            def t(q, lo=lo, hi=hi):
-                return q * (hi - lo) + lo
-
-        elif kind == "loguniform":
-            if len(args) >= 2:
-                lo, hi = float(args[0]), float(args[1])
-            else:
-                lo, hi = _require_finite_bounds(name)
-            if lo <= 0 or hi <= 0:
-                raise ValueError(f"loguniform prior for {name!r} requires lo>0 and hi>0.")
-            log_lo = float(np.log(lo))
-            log_hi = float(np.log(hi))
-
-            def t(q, log_lo=log_lo, log_hi=log_hi):
-                return np.exp(q * (log_hi - log_lo) + log_lo)
-
-        elif kind == "normal":
-            if len(args) < 2:
-                raise TypeError(f"normal prior for {name!r} expects ('normal', mean, sigma).")
-            mu = float(args[0])
-            sig = float(args[1])
-            if sig <= 0:
-                raise ValueError(f"normal prior for {name!r} requires sigma > 0.")
-
-            # Optional truncation if both bounds are finite.
-            if bounds is not None and bounds[0] is not None and bounds[1] is not None:
-                lo = float(bounds[0])
-                hi = float(bounds[1])
-                if np.isfinite(lo) and np.isfinite(hi) and lo < hi:
-                    rv = scipy.stats.norm(mu, sig)
-                    c_lo = rv.cdf(lo)
-                    c_hi = rv.cdf(hi)
-
-                    def t(q, rv=rv, c_lo=c_lo, c_hi=c_hi):
-                        # Map q in [0,1] -> [c_lo, c_hi] then invert.
-                        return rv.ppf(c_lo + q * (c_hi - c_lo))
-                else:
-                    rv = scipy.stats.norm(mu, sig)
-
-                    def t(q, rv=rv):
-                        return rv.ppf(q)
-            else:
-                rv = scipy.stats.norm(mu, sig)
-
-                def t(q, rv=rv):
-                    return rv.ppf(q)
-
-        else:
-            raise NotImplementedError(
-                f"Unsupported prior kind {kind!r} for {name!r} (v1 supports uniform/loguniform/normal)."
-            )
-
-        transforms.append(t)
-
-    def transform(cube: np.ndarray):
-        cube = np.asarray(cube, dtype=float)
-        if cube.ndim == 1:
-            out = np.empty((len(transforms),), dtype=float)
-            for j, fn in enumerate(transforms):
-                out[j] = float(fn(float(cube[j])))
-            return out
-        if cube.ndim == 2:
-            out = np.empty_like(cube, dtype=float)
-            for j, fn in enumerate(transforms):
-                out[:, j] = fn(cube[:, j])
-            return out
-        raise ValueError("cube must have shape (P,) or (N,P).")
-
-    return transform
-
-
-def _build_gaussian_loglike(
-    *,
-    model: "Model",
-    x: Any,
-    y: np.ndarray,
-    sigma: Optional[np.ndarray],
-    fixed_map: Dict[str, float],
-    free_names: List[str],
-    vectorized: bool,
-) -> Any:
-    """
-    Gaussian log-likelihood with correct normalization for evidence:
-      log L = -1/2 Σ ((y_model - y)/σ)^2 - Σ log σ - (N/2) log(2π)
-    """
-    y = np.asarray(y, dtype=float)
-    if sigma is None:
-        sig = None
-        log_norm = -0.5 * float(y.size) * float(np.log(2.0 * np.pi))
-    else:
-        sig = np.asarray(sigma, dtype=float)
-        sig = np.broadcast_to(sig, y.shape)
-        log_norm = -float(np.sum(np.log(sig))) - 0.5 * float(y.size) * float(np.log(2.0 * np.pi))
-
-    def _one(theta_free: np.ndarray) -> float:
-        kwargs = dict(fixed_map)
-        for j, name in enumerate(free_names):
-            kwargs[name] = float(theta_free[j])
-        y_model = np.asarray(model.eval(x, **kwargs), dtype=float)
-        y_model = np.broadcast_to(y_model, y.shape)
-        if sig is None:
-            chi2 = np.sum((y_model - y) ** 2)
-        else:
-            chi2 = np.sum(((y_model - y) / sig) ** 2)
-        return float(-0.5 * chi2 + log_norm)
-
-    if not vectorized:
-        return _one
-
-    def _many(thetas: np.ndarray) -> np.ndarray:
-        thetas = np.asarray(thetas, dtype=float)
-        if thetas.ndim == 1:
-            return np.asarray(_one(thetas), dtype=float)
-        out = np.empty((thetas.shape[0],), dtype=float)
-        for i in range(thetas.shape[0]):
-            out[i] = _one(thetas[i])
-        return out
-
-    return _many

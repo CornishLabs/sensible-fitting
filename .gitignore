@@ -1,5 +1,6 @@
 # Repo specific
 repo_dump.txt
+*.patch
 
 # General
 .DS_Store

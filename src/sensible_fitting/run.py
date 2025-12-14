@@ -61,6 +61,8 @@ class Results:
             # unwrap to a plain dict when slicing down to a scalar batch element.
             if "per_batch" in out:
                 pb = out["per_batch"]
+                if isinstance(pb, dict):
+                    return pb
                 if isinstance(pb, np.ndarray) and pb.shape == ():
                     maybe = pb.item()
                     if isinstance(maybe, dict):
@@ -105,8 +107,18 @@ class Results:
             new_seed = ParamsView(seed_items)
 
         cov = self.cov
-        if cov is not None and np.asarray(cov).ndim >= 3:
-            cov = np.asarray(cov)[idx]
+        # cov may be:
+        #  - None
+        #  - ndarray (P,P) for scalar
+        #  - ndarray object array shaped batch_shape containing (P,P) arrays / None
+        #  - dense stacked array (B,P,P) for legacy/other backends
+        if isinstance(cov, np.ndarray):
+            if cov.dtype == object and cov.shape[: len(self.batch_shape)] == self.batch_shape:
+                cov = cov[idx]
+                if isinstance(cov, np.ndarray) and cov.shape == ():
+                    cov = cov.item()
+            elif cov.ndim >= 3:
+                cov = cov[idx]
 
         new_batch_shape = ()
         for pv in new_items.values():
@@ -166,8 +178,18 @@ class Results:
                 if e is None:
                     row.append(f"{float(v):>14.{digits}g}")
                 else:
-                    eflat = np.asarray(e).reshape((batch_size,))[i]
-                    row.append(f"{float(v):>7.{digits}g}±{float(eflat):<6.{digits}g}")
+                    eflat = np.asarray(e, dtype=object).reshape((batch_size,))[i]
+                    if eflat is None:
+                        row.append(f"{float(v):>14.{digits}g}")
+                    else:
+                        try:
+                            ef = float(eflat)
+                            if not np.isfinite(ef):
+                                row.append(f"{float(v):>14.{digits}g}")
+                            else:
+                                row.append(f"{float(v):>7.{digits}g}±{ef:<6.{digits}g}")
+                        except Exception:
+                            row.append(f"{float(v):>14.{digits}g}")
             lines.append(" ".join(row))
 
         if batch_size > show:

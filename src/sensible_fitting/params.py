@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Iterable
 
 import numpy as np
 
@@ -74,7 +74,23 @@ class ParamView:
             raise ValueError(f"No stderr available for parameter {self.name!r}.")
         if unp is None:
             raise RuntimeError("uncertainties package is not available.")
-        return unp.uarray(self.value, self.stderr)
+
+        e = np.asarray(self.stderr)
+        # Support object arrays with per-batch missing values (None).
+        if e.dtype == object:
+            flat: Iterable[Any] = e.ravel().tolist()
+            if any(v is None for v in flat):
+                raise ValueError(
+                    f"stderr for {self.name!r} contains missing entries; slice to a concrete batch element first."
+                )
+            e = e.astype(float)
+
+        if not np.all(np.isfinite(e)):
+            raise ValueError(
+                f"stderr for {self.name!r} contains non-finite entries; slice to a valid batch element first."
+            )
+
+        return unp.uarray(self.value, e)
 
     def __getitem__(self, key: str) -> Any:
         if key == "value":
@@ -107,7 +123,19 @@ class MultiParamView:
             raise ValueError("No stderr available for MultiParamView.u.")
         if unp is None:
             raise RuntimeError("uncertainties package is not available.")
-        return unp.uarray(self.value, self.stderr)
+        e = np.asarray(self.stderr)
+        if e.dtype == object:
+            flat = e.ravel().tolist()
+            if any(v is None for v in flat):
+                raise ValueError(
+                    "MultiParamView.stderr contains missing entries; slice to a concrete batch element first."
+                )
+            e = e.astype(float)
+        if not np.all(np.isfinite(e)):
+            raise ValueError(
+                "MultiParamView.stderr contains non-finite entries; slice to a valid batch element first."
+            )
+        return unp.uarray(self.value, e)
 
 
 class ParamsView(Mapping[str, ParamView]):
@@ -182,12 +210,18 @@ class ParamsView(Mapping[str, ParamView]):
                 all_have_err = False
                 stderrs.append(None)
             else:
-                stderrs.append(np.asarray(pv.stderr))
+                e = np.asarray(pv.stderr)
+                # If this is an object array with per-batch None, treat as "no complete stderr".
+                if e.dtype == object and any(vv is None for vv in e.ravel().tolist()):
+                    all_have_err = False
+                    stderrs.append(None)
+                else:
+                    stderrs.append(np.asarray(pv.stderr, dtype=float))
 
         value_arr = np.stack(values, axis=-1)
         stderr_arr = None
         if all_have_err:
-            stderr_arr = np.stack([np.asarray(e) for e in stderrs], axis=-1)  # type: ignore[arg-type]
+            stderr_arr = np.stack([np.asarray(e, dtype=float) for e in stderrs], axis=-1)  # type: ignore[arg-type]
 
         return MultiParamView(names=names, value=value_arr, stderr=stderr_arr)
 
