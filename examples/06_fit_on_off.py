@@ -18,11 +18,11 @@ x = np.linspace(0, 1, N)
 sigma = 0.6
 y = model.eval(x, amplitude=2.0, frequency=3.0) + rng.normal(0, sigma, size=x.size)
 
-# Always a Run; skip=True => "seed only" mode
+# Always a Run; optimise=False => "seed only" mode
 run = model.fit(
     x,
     (y, sigma),
-    skip=not fit_data,
+    optimise=fit_data,
 ).squeeze()
 
 res = run.results

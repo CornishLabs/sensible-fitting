@@ -174,7 +174,7 @@ class Model:
         x: Any,
         y: Any,
         *,
-        seed: Optional[Mapping[str, float]] = None,
+        seed_override: Optional[Mapping[str, float]] = None,
         data_format: Optional[str] = None,
         parallel: Optional[Literal[None, "auto"]] = None,
         backend_options: Optional[Dict[str, Any]] = None,
@@ -182,7 +182,7 @@ class Model:
     ) -> ParamsView:
         """Compute parameter seeds without running the optimiser.
 
-        This is equivalent to a `fit(..., skip=True)` call, but returns the
+        This is equivalent to a `fit(..., optimise=False)` call, but returns the
         seed parameter view directly.
         """
         run = self.fit(
@@ -191,8 +191,8 @@ class Model:
             backend="scipy.curve_fit",
             data_format=data_format,
             parallel=parallel,
-            seed=seed,
-            skip=True,
+            seed_override=seed_override,
+            optimise=False,
             backend_options=backend_options,
             rng=rng,
         )
@@ -212,8 +212,8 @@ class Model:
         ] = "scipy.curve_fit",
         data_format: Optional[str] = None,
         parallel: Optional[Literal[None, "auto"]] = None,
-        seed: Optional[Mapping[str, float]] = None,
-        skip: bool = False,
+        seed_override: Optional[Mapping[str, float]] = None,
+        optimise: bool = False,
         backend_options: Optional[Dict[str, Any]] = None,
         rng: Optional[np.random.Generator] = None,
     ) -> Run:
@@ -276,7 +276,7 @@ class Model:
             si_arr = None if si is None else np.asarray(si, dtype=float)
 
             p0_map = _compute_seed_map(
-                self, xi, yi, free_names, rng=rng, user_seed=seed
+                self, xi, yi, free_names, rng=rng, user_seed=seed_override
             )
             p0 = np.array([float(p0_map[n]) for n in free_names], dtype=float)
             bounds = _bounds_for_free(self.params, free_names)
@@ -287,9 +287,9 @@ class Model:
             for n, fv in fixed_map.items():
                 seed_values[n][i] = float(fv)
 
-            if skip:
+            if not optimise:
                 successes.append(True)
-                messages.append("skipped (seed only)")
+                messages.append("optimise=False (seed only)")
                 for j, n in enumerate(free_names):
                     values[n][i] = p0[j]
                 for n, fv in fixed_map.items():
@@ -578,13 +578,13 @@ def _compute_seed_map(
     y: np.ndarray,
     free_names: List[str],
     rng: np.random.Generator,
-    user_seed: Optional[Mapping[str, float]] = None,
+    seed_override: Optional[Mapping[str, float]] = None,
 ) -> Dict[str, float]:
     """Compute initial seeds for the given dataset.
 
     Precedence per free parameter:
 
-      1) per-call `user_seed` (fit(..., seed=...))
+      1) per-call `seed_override` (fit(..., seed=...))
       2) strong guess via model.guess(...)
       3) model guessers (with_guesser)
       4) weak guess via model.weak_guess(...) (and function defaults)
@@ -603,8 +603,8 @@ def _compute_seed_map(
     seeds = {n: float(v) for n, v in seeds.items() if n in free_names}
 
     # 1) overlay per-call seed (highest precedence)
-    if user_seed is not None:
-        for n, v in user_seed.items():
+    if seed_override is not None:
+        for n, v in seed_override.items():
             if n in free_names:
                 seeds[n] = float(v)
 

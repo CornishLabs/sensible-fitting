@@ -42,12 +42,12 @@ print("Seed parameters:")
 for name, pv in seed_params.items():
     print(f"  {name:>10s} = {pv.value:.4g}")
 
-# --- 2) Do a seed-only 'fit' (skip=True) -------------------------------------
+# --- 2) Do a seed-only 'fit' (optimise=False) -------------------------------------
 
 run_seed = model.fit(
     x,
     (y, sigma),
-    skip=True,  # seed-only mode
+    optimise=False,  # seed-only mode
 ).squeeze()
 
 # run_seed.results.params == run_seed.results.seed here (up to fixed params)
@@ -69,11 +69,11 @@ forced_seed = {"frequency": 6.0}
 run_forced_seed = model.fit(
     x,
     (y, sigma),
-    seed=forced_seed,
-    skip=True,  # use *only* this seed, no optimisation
+    seed_override=forced_seed,
+    optimise=False,  # use *only* this seed, no optimisation
 ).squeeze()
 
-print("\nForced-seed parameters (seed={'frequency': 6.0}, skip=True):")
+print("\nForced-seed parameters (seed={'frequency': 6.0}, optimise=False):")
 for name, pv in run_forced_seed.results.seed.items():
     print(f"  {name:>10s} = {pv.value:.4g}")
 

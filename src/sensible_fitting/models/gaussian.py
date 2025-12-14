@@ -39,7 +39,6 @@ def gaussian_with_offset(*, name: str = "gaussian") -> Model:
         .bound(a=(0.0, None), sigma=(1e-12, None))
     )
 
-    @base.guesser
     def init_gaussian(x, y, g):
         """GuessState-based equivalent of the old parameter_initialiser.
 
