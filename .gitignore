@@ -1,3 +1,6 @@
+# Repo specific
+repo_dump.txt
+
 # General
 .DS_Store
 __MACOSX/
