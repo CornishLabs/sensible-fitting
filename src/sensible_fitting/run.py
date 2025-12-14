@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Literal, Mapping, Optional, Tuple
 
 import numpy as np
@@ -23,6 +23,8 @@ class Results:
     seed: Optional[ParamsView] = None
     cov: Optional[np.ndarray] = None
     backend: str = ""
+    # Backend-specific extras (e.g. UltraNest logZ / posterior samples)
+    stats: Dict[str, Any] = field(default_factory=dict)
 
     def __getitem__(self, key):
         # ---- Parameter access sugar ----------------------------------------
@@ -43,6 +45,27 @@ class Results:
         idx = key
         if self.batch_shape == ():
             raise IndexError("Scalar Results cannot be indexed; already squeezed.")
+        
+        # Slice backend stats in a conservative way.
+        def _slice_stats(stats: Dict[str, Any], idx: Any) -> Dict[str, Any]:
+            if not stats:
+                return {}
+            out: Dict[str, Any] = {}
+            for k, v in stats.items():
+                # Common pattern: object arrays / ndarrays carrying batch dims
+                if isinstance(v, np.ndarray) and v.shape[: len(self.batch_shape)] == self.batch_shape:
+                    out[k] = v[idx]
+                    continue
+                out[k] = v
+            # Convenience: if we carry per-batch dicts as an object array under "per_batch",
+            # unwrap to a plain dict when slicing down to a scalar batch element.
+            if "per_batch" in out:
+                pb = out["per_batch"]
+                if isinstance(pb, np.ndarray) and pb.shape == ():
+                    maybe = pb.item()
+                    if isinstance(maybe, dict):
+                        return maybe
+            return out
 
         def _slice(v):
             if v is None:
@@ -98,10 +121,20 @@ class Results:
             seed=new_seed,
             cov=cov,
             backend=self.backend,
+            stats=_slice_stats(self.stats, idx),
         )
 
     def summary(self, digits: int = 4) -> str:
         lines = [f"Results(backend={self.backend!r}, batch_shape={self.batch_shape})"]
+        if self.batch_shape == () and self.stats:
+            if "logz" in self.stats:
+                try:
+                    lines.append(
+                        f"  {'logZ':>12s}: {float(self.stats['logz']):.{digits}g} ± {float(self.stats.get('logzerr', float('nan'))):.{digits}g}"
+                    )
+                except Exception:
+                    pass
+ 
 
         if self.batch_shape == ():
             for name, pv in self.params.items():
@@ -262,9 +295,50 @@ class Run:
         else:
             qlo, qhi = conf_int
 
-        # v1: covariance-only (posterior reserved)
-        if method not in ("auto", "covariance"):
-            raise NotImplementedError("v1: posterior-based band() is reserved.")
+        stats = getattr(self.results, "stats", {}) or {}
+
+        if method == "auto":
+            method = "posterior" if ("posterior_samples" in stats) else "covariance"
+
+        if method == "posterior":
+            samples = np.asarray(stats.get("posterior_samples", None))
+            if samples is None or samples.size == 0:
+                raise ValueError("No posterior_samples available for posterior band().")
+            if samples.ndim != 2:
+                raise ValueError("posterior_samples must have shape (S, P).")
+
+            free_names = list(stats.get("free_names", ()))
+            if not free_names:
+                free_names = [p.name for p in getattr(self.model, "params") if not p.fixed]
+
+            if samples.shape[1] != len(free_names):
+                raise ValueError(
+                    f"posterior_samples has P={samples.shape[1]} columns but free_names has {len(free_names)}."
+                )
+
+            S = samples.shape[0]
+            take = min(int(nsamples), int(S))
+            if take <= 0:
+                raise ValueError("nsamples must be >= 1.")
+            if take < S:
+                idx = rng.choice(S, size=take, replace=False)
+                theta = samples[idx]
+            else:
+                theta = samples
+
+            preds = []
+            for s in range(theta.shape[0]):
+                p = {name: float(theta[s, j]) for j, name in enumerate(free_names)}
+                preds.append(np.asarray(self.model.eval(x, **p)))
+            preds = np.stack(preds, axis=0)
+
+            lo = np.quantile(preds, qlo, axis=0)
+            hi = np.quantile(preds, qhi, axis=0)
+            med = np.quantile(preds, 0.5, axis=0)
+            return Band(low=lo, high=hi, median=med)
+
+        if method != "covariance":
+            raise ValueError(f"Unknown band() method: {method!r}")
 
         cov = self.results.cov
         if cov is None:

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import numpy as np
+import math
 from scipy.optimize import minimize
 
 
@@ -24,7 +25,14 @@ def fit_minimize(
     options: Optional[Dict[str, Any]] = None,
 ) -> MinimizeResult:
     lo, hi = bounds
-    scipy_bounds = [(float(lo[i]), float(hi[i])) for i in range(int(x0.shape[0]))]
+    scipy_bounds = []
+    for i in range(int(x0.shape[0])):
+        lo_i = float(lo[i])
+        hi_i = float(hi[i])
+        # SciPy prefers None for unbounded sides (vs ±inf).
+        lo_b = None if (not math.isfinite(lo_i)) else lo_i
+        hi_b = None if (not math.isfinite(hi_i)) else hi_i
+        scipy_bounds.append((lo_b, hi_b))
 
     res = minimize(
         lambda v: float(objective(np.asarray(v, dtype=float))),

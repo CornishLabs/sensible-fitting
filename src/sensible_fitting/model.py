@@ -20,6 +20,7 @@ from scipy.special import gammaln
 
 from .backends.scipy_curve_fit import fit_curve_fit
 from .backends.scipy_minimize import fit_minimize
+from .backends.ultranest_backend import fit_ultranest
 from .params import DerivedSpec, GuessState, ParameterSpec, ParamView, ParamsView
 from .run import Results, Run
 from .util import (
@@ -155,6 +156,16 @@ class Model:
             args = tuple(p[1:])
             m[k] = replace(m[k], prior=(kind, args))
         return replace(self, params=tuple(m[n] for n in self.param_names))
+    
+    def wrap(self, **wrapped: bool) -> "Model":
+        """Mark parameters as circular/periodic (for samplers like UltraNest)."""
+        m = {p.name: p for p in self.params}
+        for k, v in wrapped.items():
+            if k not in m:
+                raise KeyError(k)
+            m[k] = replace(m[k], wrapped=bool(v))
+        return replace(self, params=tuple(m[n] for n in self.param_names))
+
 
     def derive(
         self, name: str, func: Callable[[Mapping[str, float]], float], *, doc: str = ""
@@ -343,6 +354,8 @@ class Model:
 
         successes: List[bool] = []
         messages: List[str] = []
+        # For Bayesian backends, store per-dataset extra stats (may be dicts).
+        stats_list: List[Dict[str, Any]] = []
 
         for i, ds in enumerate(datasets):
             xi = ds["x"]
@@ -396,37 +409,94 @@ class Model:
                 continue
 
             if fmt == "normal":
-                if backend != "scipy.curve_fit":
-                    raise NotImplementedError(
-                        "v1: normal data currently uses backend='scipy.curve_fit'."
+                if backend == "scipy.curve_fit":
+                    f_wrapped = _wrap_free_params(self, fixed_map, free_names)
+                    r = fit_curve_fit(
+                        f_wrapped,
+                        xi,
+                        yi,
+                        sigma=si_arr,
+                        p0=p0,
+                        bounds=bounds,
+                        maxfev=backend_options.get("maxfev"),
+                    )
+                    successes.append(bool(r.success))
+                    messages.append(str(r.message))
+                    stats_list.append({})
+
+                    for j, n in enumerate(free_names):
+                        values[n][i] = r.popt[j]
+                    for n, fv in fixed_map.items():
+                        values[n][i] = float(fv)
+
+                    if r.pcov is not None:
+                        pcov = np.asarray(r.pcov, dtype=float)
+                        covs.append(pcov)
+                        perr = np.sqrt(np.clip(np.diag(pcov), 0.0, np.inf))
+                        for j, n in enumerate(free_names):
+                            errors[n][i] = perr[j]
+                    else:
+                        covs.append(None)
+
+                elif backend == "ultranest":
+                    # Build prior transform (unit cube -> physical params) and loglike.
+                    transform = _build_prior_transform(self.params, free_names)
+                    loglike = _build_gaussian_loglike(
+                        model=self,
+                        x=xi,
+                        y=yi,
+                        sigma=si_arr,
+                        fixed_map=fixed_map,
+                        free_names=free_names,
+                        vectorized=bool(backend_options.get("vectorized", False)),
                     )
 
-                f_wrapped = _wrap_free_params(self, fixed_map, free_names)
-                r = fit_curve_fit(
-                    f_wrapped,
-                    xi,
-                    yi,
-                    sigma=si_arr,
-                    p0=p0,
-                    bounds=bounds,
-                    maxfev=backend_options.get("maxfev"),
-                )
-                successes.append(bool(r.success))
-                messages.append(str(r.message))
+                    wrapped_params = [
+                        bool(_spec_by_name(self.params, n).wrapped) for n in free_names
+                    ]
 
-                for j, n in enumerate(free_names):
-                    values[n][i] = r.popt[j]
-                for n, fv in fixed_map.items():
-                    values[n][i] = float(fv)
+                    reserved = {"log_dir", "resume", "sampler_kwargs", "run_kwargs", "vectorized"}
+                    run_kwargs = dict(backend_options.get("run_kwargs", {}) or {})
+                    # Convenience: allow passing UltraNest run() kwargs directly in backend_options.
+                    for k, v in backend_options.items():
+                        if k in reserved:
+                            continue
+                        run_kwargs.setdefault(k, v)
 
-                if r.pcov is not None:
-                    pcov = np.asarray(r.pcov, dtype=float)
-                    covs.append(pcov)
-                    perr = np.sqrt(np.clip(np.diag(pcov), 0.0, np.inf))
+                    sampler_kwargs = dict(backend_options.get("sampler_kwargs", {}) or {})
+                    # Keep sampler kwargs aligned with our vectorization choice.
+                    sampler_kwargs.setdefault("vectorized", bool(backend_options.get("vectorized", False)))
+
+                    r = fit_ultranest(
+                        param_names=list(free_names),
+                        loglike=loglike,
+                        transform=transform,
+                        wrapped_params=wrapped_params,
+                        log_dir=backend_options.get("log_dir"),
+                        resume=backend_options.get("resume", "subfolder"),
+                        sampler_kwargs=sampler_kwargs,
+                        run_kwargs=run_kwargs,
+                        fallback_theta=p0,
+                    )
+
+                    successes.append(bool(r.success))
+                    messages.append(str(r.message))
+                    stats_list.append(r.stats or {})
+
                     for j, n in enumerate(free_names):
-                        errors[n][i] = perr[j]
+                        values[n][i] = r.mean[j]
+                    for n, fv in fixed_map.items():
+                        values[n][i] = float(fv)
+
+                    covs.append(r.cov)
+                    if r.stdev is not None:
+                        for j, n in enumerate(free_names):
+                            errors[n][i] = float(r.stdev[j])
+
                 else:
-                    covs.append(None)
+                    raise NotImplementedError(
+                        "v1: normal data supports backend in {'scipy.curve_fit', 'ultranest'}."
+                    )
             else:
                 if backend != "scipy.minimize":
                     raise NotImplementedError(
@@ -468,6 +538,7 @@ class Model:
                         errors[n][i] = perr[j]
                 else:
                     covs.append(None)
+                stats_list.append({})
 
         have_any_cov = any(c is not None for c in covs)
 
@@ -503,6 +574,7 @@ class Model:
                 seed=ParamsView(seed_items),
                 cov=cov,
                 backend=backend,
+                stats=(stats_list[0] if stats_list else {}),
             )
         else:
             items = {}
@@ -534,12 +606,23 @@ class Model:
                 cov = unflatten_batch(cov, batch_shape)
             else:
                 cov = None
+
+            # If we have per-dataset stats (e.g. UltraNest), store them as an object array
+            # carrying the batch dims so Results slicing can pick the right element.
+            stats: Dict[str, Any] = {}
+            if stats_list:
+                stats["per_batch"] = unflatten_batch(
+                    np.asarray(stats_list, dtype=object), batch_shape
+                )
+
+
             results = Results(
                 batch_shape=batch_shape,
                 params=ParamsView(items),
                 seed=ParamsView(seed_items),
                 cov=cov,
                 backend=backend,
+                stats=stats,
             )
 
         # Post-fit derived params (v1): depend only on fitted params
@@ -861,3 +944,168 @@ def _compute_seed_map(
         )
 
     return seeds
+
+def _build_prior_transform(
+    params: Tuple[ParameterSpec, ...], free_names: List[str]
+) -> Any:
+    """
+    Build an UltraNest-style prior transform: cube in [0,1]^P -> physical params.
+    Uses ParameterSpec.prior if present; otherwise defaults to Uniform(bounds).
+
+    Supported priors (v1):
+      - ('uniform', lo, hi) or no-args + finite bounds
+      - ('loguniform', lo, hi)  (lo>0, hi>0)
+      - ('normal', mean, sigma) (optionally truncated if finite bounds are set)
+    """
+    import scipy.stats
+
+    pmap = {p.name: p for p in params}
+
+    transforms = []
+    for name in free_names:
+        spec = pmap[name]
+        prior = spec.prior
+        bounds = spec.bounds
+
+        kind = None
+        args: Tuple[Any, ...] = ()
+        if prior is not None:
+            kind, args = prior
+            kind = str(kind).lower()
+
+        def _require_finite_bounds(n: str) -> tuple[float, float]:
+            if bounds is None or bounds[0] is None or bounds[1] is None:
+                raise ValueError(
+                    f"UltraNest needs a proper prior for {n!r}. "
+                    f"Either set .prior({n}=...) or finite bounds via .bound({n}=(lo,hi))."
+                )
+            lo, hi = float(bounds[0]), float(bounds[1])
+            if not (np.isfinite(lo) and np.isfinite(hi) and lo < hi):
+                raise ValueError(f"Bounds for {n!r} must be finite and lo < hi for UltraNest.")
+            return lo, hi
+
+        if kind is None or kind == "uniform":
+            if len(args) >= 2:
+                lo, hi = float(args[0]), float(args[1])
+            else:
+                lo, hi = _require_finite_bounds(name)
+
+            def t(q, lo=lo, hi=hi):
+                return q * (hi - lo) + lo
+
+        elif kind == "loguniform":
+            if len(args) >= 2:
+                lo, hi = float(args[0]), float(args[1])
+            else:
+                lo, hi = _require_finite_bounds(name)
+            if lo <= 0 or hi <= 0:
+                raise ValueError(f"loguniform prior for {name!r} requires lo>0 and hi>0.")
+            log_lo = float(np.log(lo))
+            log_hi = float(np.log(hi))
+
+            def t(q, log_lo=log_lo, log_hi=log_hi):
+                return np.exp(q * (log_hi - log_lo) + log_lo)
+
+        elif kind == "normal":
+            if len(args) < 2:
+                raise TypeError(f"normal prior for {name!r} expects ('normal', mean, sigma).")
+            mu = float(args[0])
+            sig = float(args[1])
+            if sig <= 0:
+                raise ValueError(f"normal prior for {name!r} requires sigma > 0.")
+
+            # Optional truncation if both bounds are finite.
+            if bounds is not None and bounds[0] is not None and bounds[1] is not None:
+                lo = float(bounds[0])
+                hi = float(bounds[1])
+                if np.isfinite(lo) and np.isfinite(hi) and lo < hi:
+                    rv = scipy.stats.norm(mu, sig)
+                    c_lo = rv.cdf(lo)
+                    c_hi = rv.cdf(hi)
+
+                    def t(q, rv=rv, c_lo=c_lo, c_hi=c_hi):
+                        # Map q in [0,1] -> [c_lo, c_hi] then invert.
+                        return rv.ppf(c_lo + q * (c_hi - c_lo))
+                else:
+                    rv = scipy.stats.norm(mu, sig)
+
+                    def t(q, rv=rv):
+                        return rv.ppf(q)
+            else:
+                rv = scipy.stats.norm(mu, sig)
+
+                def t(q, rv=rv):
+                    return rv.ppf(q)
+
+        else:
+            raise NotImplementedError(
+                f"Unsupported prior kind {kind!r} for {name!r} (v1 supports uniform/loguniform/normal)."
+            )
+
+        transforms.append(t)
+
+    def transform(cube: np.ndarray):
+        cube = np.asarray(cube, dtype=float)
+        if cube.ndim == 1:
+            out = np.empty((len(transforms),), dtype=float)
+            for j, fn in enumerate(transforms):
+                out[j] = float(fn(float(cube[j])))
+            return out
+        if cube.ndim == 2:
+            out = np.empty_like(cube, dtype=float)
+            for j, fn in enumerate(transforms):
+                out[:, j] = fn(cube[:, j])
+            return out
+        raise ValueError("cube must have shape (P,) or (N,P).")
+
+    return transform
+
+
+def _build_gaussian_loglike(
+    *,
+    model: "Model",
+    x: Any,
+    y: np.ndarray,
+    sigma: Optional[np.ndarray],
+    fixed_map: Dict[str, float],
+    free_names: List[str],
+    vectorized: bool,
+) -> Any:
+    """
+    Gaussian log-likelihood with correct normalization for evidence:
+      log L = -1/2 Σ ((y_model - y)/σ)^2 - Σ log σ - (N/2) log(2π)
+    """
+    y = np.asarray(y, dtype=float)
+    if sigma is None:
+        sig = None
+        log_norm = -0.5 * float(y.size) * float(np.log(2.0 * np.pi))
+    else:
+        sig = np.asarray(sigma, dtype=float)
+        sig = np.broadcast_to(sig, y.shape)
+        log_norm = -float(np.sum(np.log(sig))) - 0.5 * float(y.size) * float(np.log(2.0 * np.pi))
+
+    def _one(theta_free: np.ndarray) -> float:
+        kwargs = dict(fixed_map)
+        for j, name in enumerate(free_names):
+            kwargs[name] = float(theta_free[j])
+        y_model = np.asarray(model.eval(x, **kwargs), dtype=float)
+        y_model = np.broadcast_to(y_model, y.shape)
+        if sig is None:
+            chi2 = np.sum((y_model - y) ** 2)
+        else:
+            chi2 = np.sum(((y_model - y) / sig) ** 2)
+        return float(-0.5 * chi2 + log_norm)
+
+    if not vectorized:
+        return _one
+
+    def _many(thetas: np.ndarray) -> np.ndarray:
+        thetas = np.asarray(thetas, dtype=float)
+        if thetas.ndim == 1:
+            return np.asarray(_one(thetas), dtype=float)
+        out = np.empty((thetas.shape[0],), dtype=float)
+        for i in range(thetas.shape[0]):
+            out[i] = _one(thetas[i])
+        return out
+
+    return _many

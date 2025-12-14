@@ -33,6 +33,8 @@ class ParameterSpec:
     weak_guess: Optional[float] = None
     # Stored for Bayesian backends (ignored by curve_fit in v1)
     prior: Optional[Tuple[str, Tuple[Any, ...]]] = None
+    # For samplers with periodic/circular parameters (e.g. UltraNest wrapped_params)
+    wrapped: bool = False
 
 
 @dataclass(frozen=True)
