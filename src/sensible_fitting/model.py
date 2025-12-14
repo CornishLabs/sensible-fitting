@@ -16,8 +16,10 @@ from typing import (
 
 
 import numpy as np
+from scipy.special import gammaln
 
 from .backends.scipy_curve_fit import fit_curve_fit
+from .backends.scipy_minimize import fit_minimize
 from .params import DerivedSpec, GuessState, ParameterSpec, ParamView, ParamsView
 from .run import Results, Run
 from .util import (
@@ -185,10 +187,19 @@ class Model:
         This is equivalent to a `fit(..., optimise=False)` call, but returns the
         seed parameter view directly.
         """
+
+        # Pick a sensible backend label (even though optimise=False won't call it).
+        if data_format == "binomial":
+            seed_backend: Literal[
+                "scipy.curve_fit", "scipy.minimize", "ultranest"
+            ] = "scipy.minimize"
+        else:
+            seed_backend = "scipy.curve_fit"
+
         run = self.fit(
             x,
             y,
-            backend="scipy.curve_fit",
+            backend=seed_backend,
             data_format=data_format,
             parallel=parallel,
             seed_override=seed_override,
@@ -213,7 +224,7 @@ class Model:
         data_format: Optional[str] = None,
         parallel: Optional[Literal[None, "auto"]] = None,
         seed_override: Optional[Mapping[str, float]] = None,
-        optimise: bool = False,
+        optimise: bool = True,
         backend_options: Optional[Dict[str, Any]] = None,
         rng: Optional[np.random.Generator] = None,
     ) -> Run:
@@ -221,41 +232,69 @@ class Model:
             rng = np.random.default_rng()
         backend_options = backend_options or {}
 
-        # v1: only Gaussian inference (data_format None or 'normal')
-        if data_format not in (None, "normal"):
+        # v1: supported likelihoods
+        if data_format is None:
+            data_format = "normal"
+        if data_format not in ("normal", "binomial"):
             raise NotImplementedError(
-                "v1 MVP supports only Gaussian default data inference."
+                "v1 supports data_format in {'normal', 'binomial'}."
             )
+
+        # If user didn't override backend and they asked for binomial, switch to minimize.
+        if data_format == "binomial" and backend == "scipy.curve_fit":
+            backend = "scipy.minimize"
 
         datasets: List[Dict[str, Any]] = []
         batch_shape: Tuple[int, ...] = ()
 
         if is_ragged_batch(x, y):
             for xi, yi in zip(x, y):
-                yobs, sigma = _infer_gaussian_payload(yi)
-                datasets.append({"x": xi, "y": yobs, "sigma": sigma})
+                if data_format == "normal":
+                    yobs, sigma = _infer_gaussian_payload(yi)
+                    datasets.append({"x": xi, "y": yobs, "sigma": sigma})
+                else:
+                    n, k = _infer_binomial_payload(yi)
+                    datasets.append({"x": xi, "n": n, "k": k})
             batch_shape = (len(datasets),)
         else:
-            yobs, sigma = _infer_gaussian_payload(y)
-            yobs = np.asarray(yobs)
-            if yobs.ndim == 1:
-                datasets.append({"x": x, "y": yobs, "sigma": sigma})
-                batch_shape = ()
-            else:
-                yflat, batch_shape = flatten_batch(yobs)
-                # broadcast sigma if needed
-                if sigma is None:
-                    sflat = [None] * yflat.shape[0]
+            if data_format == "normal":
+                yobs, sigma = _infer_gaussian_payload(y)
+                yobs = np.asarray(yobs)
+                if yobs.ndim == 1:
+                    datasets.append({"x": x, "y": yobs, "sigma": sigma})
+                    batch_shape = ()
                 else:
-                    sarr = np.asarray(sigma)
-                    if sarr.shape == ():
-                        sflat = [float(sarr)] * yflat.shape[0]
+                    yflat, batch_shape = flatten_batch(yobs)
+                    # broadcast sigma if needed
+                    if sigma is None:
+                        sflat = [None] * yflat.shape[0]
                     else:
-                        sb = np.broadcast_to(sarr, yobs.shape)
-                        sb_flat, _ = flatten_batch(sb)
-                        sflat = [sb_flat[i] for i in range(sb_flat.shape[0])]
-                for i in range(yflat.shape[0]):
-                    datasets.append({"x": x, "y": yflat[i], "sigma": sflat[i]})
+                        sarr = np.asarray(sigma)
+                        if sarr.shape == ():
+                            sflat = [float(sarr)] * yflat.shape[0]
+                        else:
+                            sb = np.broadcast_to(sarr, yobs.shape)
+                            sb_flat, _ = flatten_batch(sb)
+                            sflat = [sb_flat[i] for i in range(sb_flat.shape[0])]
+                    for i in range(yflat.shape[0]):
+                        datasets.append({"x": x, "y": yflat[i], "sigma": sflat[i]})
+            else:
+                n, k = _infer_binomial_payload(y)
+                k = np.asarray(k, dtype=float)
+                if k.ndim == 1:
+                    datasets.append({"x": x, "n": n, "k": k})
+                    batch_shape = ()
+                else:
+                    kflat, batch_shape = flatten_batch(k)
+                    n_arr = np.asarray(n, dtype=float)
+                    if n_arr.shape == ():
+                        nflat = [float(n_arr)] * kflat.shape[0]
+                    else:
+                        nb = np.broadcast_to(n_arr, k.shape)
+                        nb_flat, _ = flatten_batch(nb)
+                        nflat = [nb_flat[i] for i in range(nb_flat.shape[0])]
+                    for i in range(kflat.shape[0]):
+                        datasets.append({"x": x, "n": nflat[i], "k": kflat[i]})
 
         free_names, fixed_map = _free_and_fixed(self.params)
 
@@ -271,12 +310,27 @@ class Model:
 
         for i, ds in enumerate(datasets):
             xi = ds["x"]
-            yi = np.asarray(ds["y"])
-            si = ds["sigma"]
-            si_arr = None if si is None else np.asarray(si, dtype=float)
+            if data_format == "normal":
+                yi = np.asarray(ds["y"])
+                si = ds["sigma"]
+                si_arr = None if si is None else np.asarray(si, dtype=float)
+                y_for_seed = yi
+            else:
+                n_i = np.asarray(ds["n"], dtype=float)
+                k_i = np.asarray(ds["k"], dtype=float)
+                # For binomial, guessers usually want something y-like.
+                # Feed the observed fraction k/n (safe for n=0).
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    frac = np.where(n_i > 0, k_i / n_i, 0.0)
+                y_for_seed = frac
 
             p0_map = _compute_seed_map(
-                self, xi, yi, free_names, rng=rng, user_seed=seed_override
+                self,
+                xi,
+                np.asarray(y_for_seed, dtype=float),
+                free_names,
+                rng=rng,
+                seed_override=seed_override,
             )
             p0 = np.array([float(p0_map[n]) for n in free_names], dtype=float)
             bounds = _bounds_for_free(self.params, free_names)
@@ -297,39 +351,75 @@ class Model:
                 covs.append(None)
                 continue
 
-            if backend != "scipy.curve_fit":
-                raise NotImplementedError(
-                    "v1 MVP implements only backend='scipy.curve_fit'."
+            if data_format == "normal":
+                if backend != "scipy.curve_fit":
+                    raise NotImplementedError(
+                        "v1: normal data currently uses backend='scipy.curve_fit'."
+                    )
+
+                f_wrapped = _wrap_free_params(self, fixed_map, free_names)
+                r = fit_curve_fit(
+                    f_wrapped,
+                    xi,
+                    yi,
+                    sigma=si_arr,
+                    p0=p0,
+                    bounds=bounds,
+                    maxfev=backend_options.get("maxfev"),
                 )
+                successes.append(bool(r.success))
+                messages.append(str(r.message))
 
-            f_wrapped = _wrap_free_params(self, fixed_map, free_names)
-            r = fit_curve_fit(
-                f_wrapped,
-                xi,
-                yi,
-                sigma=si_arr,
-                p0=p0,
-                bounds=bounds,
-                maxfev=backend_options.get("maxfev"),
-            )
-            successes.append(bool(r.success))
-            messages.append(str(r.message))
-
-            # store free values
-            for j, n in enumerate(free_names):
-                values[n][i] = r.popt[j]
-            # fixed values
-            for n, fv in fixed_map.items():
-                values[n][i] = float(fv)
-
-            if r.pcov is not None:
-                pcov = np.asarray(r.pcov, dtype=float)
-                covs.append(pcov)
-                perr = np.sqrt(np.clip(np.diag(pcov), 0.0, np.inf))
                 for j, n in enumerate(free_names):
-                    errors[n][i] = perr[j]
+                    values[n][i] = r.popt[j]
+                for n, fv in fixed_map.items():
+                    values[n][i] = float(fv)
+
+                if r.pcov is not None:
+                    pcov = np.asarray(r.pcov, dtype=float)
+                    covs.append(pcov)
+                    perr = np.sqrt(np.clip(np.diag(pcov), 0.0, np.inf))
+                    for j, n in enumerate(free_names):
+                        errors[n][i] = perr[j]
+                else:
+                    covs.append(None)
             else:
-                covs.append(None)
+                if backend != "scipy.minimize":
+                    raise NotImplementedError(
+                        "v1: binomial data currently uses backend='scipy.minimize'."
+                    )
+
+                def objective(theta_free: np.ndarray) -> float:
+                    kwargs = dict(fixed_map)
+                    for j, name in enumerate(free_names):
+                        kwargs[name] = float(theta_free[j])
+                    p = np.asarray(self.eval(xi, **kwargs), dtype=float)
+                    p = np.broadcast_to(p, np.asarray(k_i).shape)
+                    return _neg_loglike_binomial(p, n_i, k_i)
+
+                r = fit_minimize(
+                    objective,
+                    p0,
+                    bounds,
+                    method=str(backend_options.get("method", "L-BFGS-B")),
+                    options=backend_options.get("options"),
+                )
+                successes.append(bool(r.success))
+                messages.append(str(r.message))
+
+                for j, n in enumerate(free_names):
+                    values[n][i] = r.xopt[j]
+                for n, fv in fixed_map.items():
+                    values[n][i] = float(fv)
+
+                if r.cov is not None:
+                    pcov = np.asarray(r.cov, dtype=float)
+                    covs.append(pcov)
+                    perr = np.sqrt(np.clip(np.diag(pcov), 0.0, np.inf))
+                    for j, n in enumerate(free_names):
+                        errors[n][i] = perr[j]
+                else:
+                    covs.append(None)
 
         have_any_cov = any(c is not None for c in covs)
 
@@ -447,7 +537,7 @@ class Model:
             model=self,
             results=results,
             backend=backend,
-            data_format=(data_format or "normal"),
+            data_format=data_format,
             data={"x": x, "y": y},
             success=(
                 successes[0]
@@ -526,6 +616,46 @@ def _infer_gaussian_payload(y: Any):
         sigma = 0.5 * (np.asarray(ylo) + np.asarray(yhi))
         return np.asarray(yobs), sigma
     return np.asarray(y), None
+
+
+def _infer_binomial_payload(y: Any):
+    """Parse binomial payload y=(n_samples, n_successes)."""
+    if not (isinstance(y, (tuple, list)) and len(y) == 2):
+        raise TypeError("binomial data expects y=(n_samples, n_successes).")
+
+    n, k = y
+    n = np.asarray(n, dtype=float)
+    k = np.asarray(k, dtype=float)
+
+    # allow scalar n broadcast
+    if n.shape == () and k.shape != ():
+        n = np.broadcast_to(n, k.shape)
+
+    if n.shape != k.shape:
+        raise ValueError(f"n_samples shape {n.shape} != n_successes shape {k.shape}")
+
+    if np.any(k < 0) or np.any(n < 0) or np.any(k > n):
+        raise ValueError(
+            "Invalid binomial data: require 0 <= n_successes <= n_samples."
+        )
+
+    return n, k
+
+
+def _neg_loglike_binomial(p: np.ndarray, n: np.ndarray, k: np.ndarray) -> float:
+    """Negative log-likelihood for Binomial(n, p) with stability clamping."""
+    p = np.asarray(p, dtype=float)
+    n = np.asarray(n, dtype=float)
+    k = np.asarray(k, dtype=float)
+
+    eps = 1e-12
+    p = np.clip(p, eps, 1.0 - eps)
+
+    # log Binomial PMF: log C(n,k) + k log p + (n-k) log(1-p)
+    # Keeping logC doesn't change the optimum, but is the true log_prob.
+    logC = gammaln(n + 1.0) - gammaln(k + 1.0) - gammaln((n - k) + 1.0)
+    ll = logC + k * np.log(p) + (n - k) * np.log(1.0 - p)
+    return float(-np.sum(ll))
 
 
 def _default_seed_engine(
