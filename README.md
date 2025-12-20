@@ -148,6 +148,24 @@ v1 supports these `data_format` payloads:
 
 ---
 
+## Data inference rules
+
+Defaults are tuned for "just pass arrays," with warnings on ambiguity:
+
+* Tuples are **payloads**: `(y, sigma)` / `(y, sigma_low, sigma_high)` for normal, `(n, k)` for binomial, `(alpha, beta)` for beta.
+* Lists are **ragged batches** only when `x` is also a list (same length).
+* Otherwise, lists are treated as array data when possible (e.g. common-x batches).
+* Ambiguous inputs emit a `UserWarning` with a hint; pass `strict=True` to raise instead.
+
+```py
+# Ambiguous: list of two arrays could be batch data or (y, sigma).
+run = model.fit(x, [y, sigma])             # warns, treated as batch data
+run = model.fit(x, (y, sigma))             # explicit payload, no warning
+run = model.fit(x, [y, sigma], strict=True)  # raises
+```
+
+---
+
 ## Batching
 
 ### Common x-grid, many datasets

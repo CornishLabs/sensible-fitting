@@ -75,10 +75,10 @@ class _UncContext:
     def _batch_shape(self, cov: Optional[np.ndarray]) -> Tuple[int, ...]:
         if cov is None or not isinstance(cov, np.ndarray):
             return ()
-        if cov.ndim <= 2:
-            return ()
         if cov.dtype == object:
             return cov.shape
+        if cov.ndim <= 2:
+            return ()
         return cov.shape[:-2]
 
     def _value_at(self, name: str, idx: Optional[Tuple[int, ...]] = None) -> float:

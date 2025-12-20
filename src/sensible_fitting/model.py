@@ -186,6 +186,7 @@ class Model:
         seed_override: Optional[Mapping[str, float]] = None,
         data_format: Optional[str] = None,
         parallel: Optional[Literal[None, "auto"]] = None,
+        strict: bool = False,
         backend_options: Optional[Dict[str, Any]] = None,
         rng: Optional[np.random.Generator] = None,
     ) -> ParamsView:
@@ -210,6 +211,7 @@ class Model:
             data_format=data_format,
             parallel=parallel,
             seed_override=seed_override,
+            strict=strict,
             optimise=False,
             backend_options=backend_options,
             rng=rng,
@@ -231,6 +233,7 @@ class Model:
         data_format: Optional[str] = None,
         parallel: Optional[Literal[None, "auto"]] = None,
         seed_override: Optional[Mapping[str, float]] = None,
+        strict: bool = False,
         optimise: bool = True,
         backend_options: Optional[Dict[str, Any]] = None,
         rng: Optional[np.random.Generator] = None,
@@ -252,7 +255,7 @@ class Model:
                 "v1: non-Gaussian data currently requires backend='scipy.minimize'."
             )
 
-        datasets, batch_shape = prepare_datasets(x, data, data_format)
+        datasets, batch_shape = prepare_datasets(x, data, data_format, strict)
 
         free_names, fixed_map = _free_and_fixed(self.params)
 

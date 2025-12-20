@@ -28,6 +28,7 @@ def main() -> None:
     )
     y = y_clean + rng.normal(0, sigma, size=y_clean.shape)
 
+    # Tuple data payload; y has batch shape (N_SYSTEMS, N) -> common-x batch fit.
     run = model.fit(x, (y, sigma))
     res = run.results
 

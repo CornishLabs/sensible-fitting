@@ -4,8 +4,9 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+from warnings import warn
 
-from .util import flatten_batch, is_ragged_batch
+from .util import flatten_batch
 
 
 @dataclass(frozen=True)
@@ -17,7 +18,7 @@ class Dataset:
 
 
 def prepare_datasets(
-    x: Any, data: Any, data_format: str
+    x: Any, data: Any, data_format: str, strict: bool = False
 ) -> Tuple[List[Dataset], Tuple[int, ...]]:
     """Normalize user inputs into a list of per-dataset payloads + batch shape."""
 
@@ -29,14 +30,61 @@ def prepare_datasets(
     datasets: List[Dataset] = []
     batch_shape: Tuple[int, ...] = ()
 
-    if is_ragged_batch(x, data):
+    if isinstance(x, list):
+        if not isinstance(data, list):
+            raise TypeError(
+                "Ragged batches require list inputs for both x and data."
+            )
+        if len(x) != len(data):
+            raise ValueError("Ragged batch requires x and data lists of equal length.")
         for xi, di in zip(x, data):
-            datasets.append(_one_dataset(xi, di, data_format))
+            datasets.append(_one_dataset(xi, di, data_format, strict))
         return datasets, (len(datasets),)
+
+    if isinstance(data, list):
+        if len(data) == 0:
+            raise ValueError("Empty data list; cannot infer batch or payload.")
+
+        if data_format in ("binomial", "beta"):
+            if _list_of_pairs(data):
+                for di in data:
+                    datasets.append(_one_dataset(x, di, data_format, strict))
+                return datasets, (len(datasets),)
+            if len(data) == 2:
+                _warn_or_raise(
+                    strict,
+                    "Interpreting list as payload; use a tuple for (n, k)/(alpha, beta) "
+                    "or a list of tuples for batching.",
+                )
+                data = tuple(data)
+            else:
+                raise TypeError(
+                    "Binomial/beta data expects a 2-tuple payload or a list of 2-tuples."
+                )
+        else:
+            arr = np.asarray(data)
+            if arr.dtype != object:
+                if len(data) in (2, 3) and not _list_all_scalars(data):
+                    _warn_or_raise(
+                        strict,
+                        "Interpreting list as batch data. If you meant (y, sigma) "
+                        "or (y, sigma_lo, sigma_hi), use a tuple.",
+                    )
+                data = arr
+            else:
+                if len(data) in (2, 3):
+                    _warn_or_raise(
+                        strict,
+                        "Interpreting ragged list as batch data. If you meant "
+                        "(y, sigma) or (y, sigma_lo, sigma_hi), use a tuple.",
+                    )
+                for di in data:
+                    datasets.append(_one_dataset(x, di, data_format, strict))
+                return datasets, (len(datasets),)
 
     # Common-x batching: detect by array dimensionality of the primary observation.
     if data_format == "normal":
-        yobs, sigma = _infer_gaussian_payload(data)
+        yobs, sigma = _infer_gaussian_payload(data, strict)
         yobs = np.asarray(yobs, dtype=float)
 
         if yobs.ndim == 1:
@@ -157,9 +205,9 @@ def prepare_datasets(
     return datasets, batch_shape
 
 
-def _one_dataset(x: Any, data: Any, fmt: str) -> Dataset:
+def _one_dataset(x: Any, data: Any, fmt: str, strict: bool) -> Dataset:
     if fmt == "normal":
-        y, sigma = _infer_gaussian_payload(data)
+        y, sigma = _infer_gaussian_payload(data, strict)
         y = np.asarray(y, dtype=float)
         return Dataset(x=x, format="normal", payload={"y": y, "sigma": sigma}, y_for_seed=y)
 
@@ -182,17 +230,23 @@ def _safe_frac(num: np.ndarray, den: np.ndarray) -> np.ndarray:
         return np.where(den > 0, num / den, 0.0)
 
 
-def _infer_gaussian_payload(y: Any):
+def _infer_gaussian_payload(y: Any, strict: bool):
     # y -> unweighted
     # (y, sigma) -> symmetric absolute errors
     # (y, sigma_low, sigma_high) -> approximate to mean sigma
-    if isinstance(y, (tuple, list)) and len(y) == 2:
+    if isinstance(y, tuple) and len(y) == 2:
         yobs, yerr = y
         return np.asarray(yobs), yerr
-    if isinstance(y, (tuple, list)) and len(y) == 3:
+    if isinstance(y, tuple) and len(y) == 3:
         yobs, ylo, yhi = y
         sigma = 0.5 * (np.asarray(ylo) + np.asarray(yhi))
         return np.asarray(yobs), sigma
+    if isinstance(y, list) and len(y) in (2, 3) and not _list_all_scalars(y):
+        _warn_or_raise(
+            strict,
+            "Ambiguous list payload. Use a tuple for (y, sigma) or "
+            "(y, sigma_lo, sigma_hi).",
+        )
     return np.asarray(y), None
 
 
@@ -235,3 +289,28 @@ def _infer_beta_payload(data: Any):
         raise ValueError("Invalid beta data: require alpha > 0 and beta > 0.")
 
     return a, b
+
+
+def _warn_or_raise(strict: bool, message: str) -> None:
+    if strict:
+        raise ValueError(message)
+    warn(message, UserWarning, stacklevel=2)
+
+
+def _list_all_scalars(data: List[Any]) -> bool:
+    return all(_is_scalar_like(v) for v in data)
+
+
+def _is_scalar_like(v: Any) -> bool:
+    if isinstance(v, np.ndarray):
+        return v.shape == ()
+    return isinstance(v, (int, float, np.number, bool))
+
+
+def _list_of_pairs(data: List[Any]) -> bool:
+    if not data:
+        return False
+    for item in data:
+        if not (isinstance(item, (tuple, list)) and len(item) == 2):
+            return False
+    return True

@@ -30,6 +30,7 @@ k = rng.binomial(n.astype(int), p_true)  # successes
 
 # --- Fit ---------------------------------------------------------------------
 
+# Tuple payload (n, k); lists are reserved for ragged batches.
 run = model.fit(
     x,
     (n, k),
