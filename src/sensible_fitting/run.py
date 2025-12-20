@@ -5,7 +5,7 @@ from typing import Any, Dict, Literal, Mapping, Optional, Tuple
 
 import numpy as np
 
-from .params import ParamView, ParamsView
+from .params import ParamView, ParamsView, _UncContext
 from .util import level_to_conf_int, prod, sample_mvn
 
 
@@ -77,17 +77,52 @@ class Results:
                 return v
             return a[idx]
 
+        cov = self.cov
+        # cov may be:
+        #  - None
+        #  - ndarray (P,P) for scalar
+        #  - ndarray object array shaped batch_shape containing (P,P) arrays / None
+        #  - dense stacked array (B,P,P) for legacy/other backends
+        if isinstance(cov, np.ndarray):
+            if cov.dtype == object and cov.shape[: len(self.batch_shape)] == self.batch_shape:
+                cov = cov[idx]
+                if isinstance(cov, np.ndarray) and cov.shape == ():
+                    cov = cov.item()
+            elif cov.ndim >= 3:
+                cov = cov[idx]
+
+        old_ctx = getattr(self.params, "_context", None)
+        free_names = ()
+        if old_ctx is not None:
+            free_names = tuple(old_ctx.free_names)
+        elif isinstance(self.stats, dict):
+            free_names = tuple(self.stats.get("free_names", ()))
+
+        values_map: Dict[str, Any] = {}
+        stderr_map: Dict[str, Any] = {}
+        ctx = _UncContext(
+            values=values_map,
+            stderrs=stderr_map,
+            cov=cov,
+            free_names=free_names,
+        )
+
         new_items: Dict[str, ParamView] = {}
         for name, pv in self.params.items():
+            v = _slice(pv.value)
+            e = _slice(pv.stderr)
+            values_map[name] = v
+            stderr_map[name] = e
             new_items[name] = ParamView(
                 name=name,
-                value=_slice(pv.value),
-                stderr=_slice(pv.stderr),
+                value=v,
+                stderr=e,
                 fixed=_slice(pv.fixed)
                 if isinstance(pv.fixed, np.ndarray)
                 else pv.fixed,
                 bounds=pv.bounds,
                 derived=pv.derived,
+                _context=ctx,
             )
 
         new_seed = None
@@ -106,20 +141,6 @@ class Results:
                 )
             new_seed = ParamsView(seed_items)
 
-        cov = self.cov
-        # cov may be:
-        #  - None
-        #  - ndarray (P,P) for scalar
-        #  - ndarray object array shaped batch_shape containing (P,P) arrays / None
-        #  - dense stacked array (B,P,P) for legacy/other backends
-        if isinstance(cov, np.ndarray):
-            if cov.dtype == object and cov.shape[: len(self.batch_shape)] == self.batch_shape:
-                cov = cov[idx]
-                if isinstance(cov, np.ndarray) and cov.shape == ():
-                    cov = cov.item()
-            elif cov.ndim >= 3:
-                cov = cov[idx]
-
         new_batch_shape = ()
         for pv in new_items.values():
             a = np.asarray(pv.value)
@@ -129,7 +150,7 @@ class Results:
 
         return Results(
             batch_shape=tuple(new_batch_shape),
-            params=ParamsView(new_items),
+            params=ParamsView(new_items, _context=ctx),
             seed=new_seed,
             cov=cov,
             backend=self.backend,

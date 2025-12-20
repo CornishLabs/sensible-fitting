@@ -19,7 +19,7 @@ from warnings import warn
 
 from .backends import get_backend
 from .data import Dataset, prepare_datasets
-from .params import DerivedSpec, GuessState, ParameterSpec, ParamView, ParamsView
+from .params import DerivedSpec, GuessState, ParameterSpec, ParamView, ParamsView, _UncContext
 from .run import Results, Run
 from .util import (
     infer_param_names,
@@ -334,18 +334,31 @@ class Model:
             items: Dict[str, ParamView] = {}
             seed_items: Dict[str, ParamView] = {}
             cov0 = covs[0] if covs.shape[0] else None
+            cov = None if cov0 is None else np.asarray(cov0, dtype=float)
+            values_map: Dict[str, Any] = {}
+            stderr_map: Dict[str, Any] = {}
+            ctx = _UncContext(
+                values=values_map,
+                stderrs=stderr_map,
+                cov=cov,
+                free_names=tuple(free_names),
+            )
             for n in self.param_names:
                 spec = _spec_by_name(self.params, n)
                 v = float(values[n][0])
                 sv = float(seed_values[n][0])
                 e = errors[n][0]
+                stderr_val = None if (spec.fixed or cov0 is None) else float(e)
+                values_map[n] = v
+                stderr_map[n] = stderr_val
                 items[n] = ParamView(
                     name=n,
                     value=v,
-                    stderr=None if (spec.fixed or cov0 is None) else float(e),
+                    stderr=stderr_val,
                     fixed=spec.fixed,
                     bounds=spec.bounds,
                     derived=False,
+                    _context=ctx,
                 )
                 seed_items[n] = ParamView(
                     name=n,
@@ -355,10 +368,9 @@ class Model:
                     bounds=spec.bounds,
                     derived=False,
                 )
-            cov = None if cov0 is None else np.asarray(cov0, dtype=float)
             results = Results(
                 batch_shape=(),
-                params=ParamsView(items),
+                params=ParamsView(items, _context=ctx),
                 seed=ParamsView(seed_items),
                 cov=cov,
                 backend=backend,
@@ -368,18 +380,30 @@ class Model:
             items = {}
             seed_items = {}
             cov_obj = unflatten_batch(np.asarray(covs, dtype=object), batch_shape)
+            values_map = {}
+            stderr_map = {}
+            ctx = _UncContext(
+                values=values_map,
+                stderrs=stderr_map,
+                cov=cov_obj,
+                free_names=tuple(free_names),
+            )
             for n in self.param_names:
                 spec = _spec_by_name(self.params, n)
                 v = unflatten_batch(values[n], batch_shape)
                 e = unflatten_batch(np.asarray(errors[n], dtype=object), batch_shape)
                 sv = unflatten_batch(seed_values[n], batch_shape)
+                stderr_val = None if spec.fixed else e
+                values_map[n] = v
+                stderr_map[n] = stderr_val
                 items[n] = ParamView(
                     name=n,
                     value=v,
-                    stderr=None if spec.fixed else e,
+                    stderr=stderr_val,
                     fixed=spec.fixed,
                     bounds=spec.bounds,
                     derived=False,
+                    _context=ctx,
                 )
                 seed_items[n] = ParamView(
                     name=n,
@@ -394,7 +418,7 @@ class Model:
             }
             results = Results(
                 batch_shape=batch_shape,
-                params=ParamsView(items),
+                params=ParamsView(items, _context=ctx),
                 seed=ParamsView(seed_items),
                 cov=cov_obj,  # object array, per-batch cov matrices (or None)
                 backend=backend,
@@ -413,7 +437,10 @@ class Model:
                     )
                 results = replace(
                     results,
-                    params=ParamsView({**dict(results.params.items()), **extra}),
+                    params=ParamsView(
+                        {**dict(results.params.items()), **extra},
+                        _context=getattr(results.params, "_context", None),
+                    ),
                 )
             else:
                 # flatten again
@@ -437,7 +464,10 @@ class Model:
                     )
                 results = replace(
                     results,
-                    params=ParamsView({**dict(results.params.items()), **extra_items}),
+                    params=ParamsView(
+                        {**dict(results.params.items()), **extra_items},
+                        _context=getattr(results.params, "_context", None),
+                    ),
                 )
 
         run = Run(
