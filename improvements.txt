@@ -5,7 +5,7 @@ Here is a list of improvements we've discussed. I'm keeping them here so they do
 # My improvement list:
 - Made the .u view of the params correctly use the correlations from the cov matrix returned.
 - Add plotting helpers.
-
+- Add tests
 
 # Improvements
 
