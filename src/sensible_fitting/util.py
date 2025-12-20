@@ -125,3 +125,58 @@ def safe_float(x: Any) -> float:
     if isinstance(x, np.ndarray) and x.shape == ():
         return float(x.item())
     return float(x)
+
+
+def uncertainty_to_string(
+    x: float, err: float, precision: int | str | None = 1
+) -> str:
+    """Format a value with uncertainty as a compact string.
+
+    Returns the shortest string representation of x +/- err as either
+    x.xx(ee)e+xx or xxx.xx(ee). Use precision="auto" to follow the
+    common 1-or-2 significant-digit rule for the uncertainty.
+    """
+    auto = precision is None or (
+        isinstance(precision, str) and precision.lower() == "auto"
+    )
+    x = float(x)
+    err = float(err)
+
+    if math.isnan(x) or math.isnan(err):
+        return "NaN"
+    if math.isinf(x) or math.isinf(err):
+        return "inf"
+
+    err = abs(err)
+    if err == 0.0:
+        if auto:
+            precision = 1
+        precision = max(1, int(precision))  # type: ignore[arg-type]
+        return f"{x:.{precision}g}(0)"
+
+    err_exp = int(math.floor(math.log10(err)))
+    if auto:
+        leading = int(err / (10 ** err_exp) + 1e-12)
+        precision = 2 if leading == 1 else 1
+    precision = max(1, int(precision))  # type: ignore[arg-type]
+
+    if x == 0.0 or abs(x) < err:
+        x_exp = err_exp
+    else:
+        x_exp = int(math.floor(math.log10(abs(x))))
+
+    un_exp = err_exp - precision + 1
+    un_int = round(err * 10 ** (-un_exp))
+
+    no_exp = un_exp
+    no_int = round(x * 10 ** (-no_exp))
+
+    fieldw = x_exp - no_exp
+    fmt = f"%.{fieldw}f"
+    result1 = (fmt + "(%.0f)e%d") % (no_int * 10 ** (-fieldw), un_int, x_exp)
+
+    fieldw = max(0, -no_exp)
+    fmt = f"%.{fieldw}f"
+    result2 = (fmt + "(%.0f)") % (no_int * 10 ** no_exp, un_int * 10 ** max(0, un_exp))
+
+    return result2 if len(result2) <= len(result1) else result1
