@@ -25,3 +25,8 @@ dev = [
     "pytest>=8.2.0",
     "pyqt6>=6.10.1",
 ]
+
+[tool.pytest.ini_options]
+markers = [
+    "examples: run example scripts",
+]

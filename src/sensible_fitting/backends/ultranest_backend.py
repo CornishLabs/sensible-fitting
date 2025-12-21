@@ -1,4 +1,6 @@
 from typing import Any, Dict, Optional, Tuple
+import tempfile
+
 import numpy as np 
 from ..inference import build_gaussian_loglike, build_prior_transform
 from .common import BackendResult
@@ -59,6 +61,11 @@ class UltraNestBackend:
 
         fallback_theta = np.asarray(p0, dtype=float)
 
+        temp_dir = None
+        if log_dir is None:
+            temp_dir = tempfile.TemporaryDirectory(prefix="ultranest_")
+            log_dir = temp_dir.name
+
         try:
             import ultranest  # local import (optional dependency)
 
@@ -107,3 +114,6 @@ class UltraNestBackend:
                 message=str(e),
                 stats={"backend": "ultranest", "error": str(e), "free_names": tuple(free_names)},
             )
+        finally:
+            if temp_dir is not None:
+                temp_dir.cleanup()
