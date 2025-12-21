@@ -50,23 +50,23 @@ class Results:
         def _slice_stats(stats: Dict[str, Any], idx: Any) -> Dict[str, Any]:
             if not stats:
                 return {}
-            out: Dict[str, Any] = {}
-            for k, v in stats.items():
-                # Common pattern: object arrays / ndarrays carrying batch dims
-                if isinstance(v, np.ndarray) and v.shape[: len(self.batch_shape)] == self.batch_shape:
-                    out[k] = v[idx]
-                    continue
-                out[k] = v
-            # Convenience: if we carry per-batch dicts as an object array under "per_batch",
-            # unwrap to a plain dict when slicing down to a scalar batch element.
-            if "per_batch" in out:
-                pb = out["per_batch"]
-                if isinstance(pb, dict):
-                    return pb
+            if "per_batch" not in stats:
+                return dict(stats)
+
+            out: Dict[str, Any] = {k: v for k, v in stats.items() if k != "per_batch"}
+            pb = stats.get("per_batch")
+            if isinstance(pb, np.ndarray):
+                if pb.shape == ():
+                    pb = pb.item()
+                else:
+                    pb = pb[idx]
                 if isinstance(pb, np.ndarray) and pb.shape == ():
-                    maybe = pb.item()
-                    if isinstance(maybe, dict):
-                        return maybe
+                    pb = pb.item()
+
+            if isinstance(pb, dict) and not out:
+                return pb
+
+            out["per_batch"] = pb
             return out
 
         def _slice(v):

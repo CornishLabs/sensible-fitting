@@ -1,7 +1,9 @@
 """
-Example: fit a 2D Gaussian (image-like data) by flattening to 1D.
+Example: fit a 2D Gaussian (image-like data).
 
-We pass x as a tuple of flattened (X, Y) grids and y as a flattened image.
+Shows both:
+1) Flattened inputs (x,y as 1D)
+2) Grid inputs (x,y as 2D arrays)
 """
 
 import numpy as np
@@ -40,16 +42,23 @@ def main() -> None:
         .guess(amp=1.5, x0=0.0, y0=0.0, sx=1.0, sy=1.0, offset=0.0)
     )
 
-    # Tuple x is fine for ND inputs; lists are reserved for ragged batches.
-    xy = (X.ravel(), Y.ravel())
+    # ---- Version A: flattened x/y -----------------------------------------
+    xy_flat = (X.ravel(), Y.ravel())
     z_flat = z.ravel()
+    run_flat = model.fit(xy_flat, (z_flat, sigma)).squeeze()
 
-    run = model.fit(xy, (z_flat, sigma)).squeeze()
-    res = run.results
+    # ---- Version B: grid x/y (non-flattened) ------------------------------
+    xy_grid = (X, Y)
+    run_grid = model.fit(xy_grid, (z, sigma)).squeeze()
 
-    print("fit params:")
+    print("fit params (flattened):")
     for name in ("amp", "x0", "y0", "sx", "sy", "offset"):
-        pv = res[name]
+        pv = run_flat.results[name]
+        print(f"  {name:>6s}: {pv.value:.4g} ± {pv.stderr:.3g}")
+
+    print("\nfit params (grid):")
+    for name in ("amp", "x0", "y0", "sx", "sy", "offset"):
+        pv = run_grid.results[name]
         print(f"  {name:>6s}: {pv.value:.4g} ± {pv.stderr:.3g}")
 
     try:
@@ -58,14 +67,14 @@ def main() -> None:
         plt = None
 
     if plt is not None:
-        z_fit = run.predict((X.ravel(), Y.ravel())).reshape(X.shape)
+        z_fit = run_grid.predict((X, Y))
         resid = z - z_fit
 
         fig, axs = plt.subplots(1, 3, figsize=(9, 3), constrained_layout=True)
         axs[0].imshow(z, origin="lower", extent=[x.min(), x.max(), y.min(), y.max()])
         axs[0].set_title("data")
         axs[1].imshow(z_fit, origin="lower", extent=[x.min(), x.max(), y.min(), y.max()])
-        axs[1].set_title("fit")
+        axs[1].set_title("fit (grid)")
         axs[2].imshow(resid, origin="lower", extent=[x.min(), x.max(), y.min(), y.max()])
         axs[2].set_title("residual")
         plt.show()

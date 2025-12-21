@@ -194,6 +194,12 @@ class Model:
 
         This is equivalent to a `fit(..., optimise=False)` call, but returns the
         seed parameter view directly.
+
+        Data inference rules (non-strict mode warns on ambiguity):
+        - tuples are payloads: (y, sigma), (y, lo, hi), (n, k), (alpha, beta)
+        - ragged batches require list inputs for both x and data
+        - lists otherwise are treated as array data when possible
+        - pass strict=True to raise on ambiguous inputs
         """
 
         # Pick a sensible backend label (even though optimise=False won't call it).
@@ -238,6 +244,14 @@ class Model:
         backend_options: Optional[Dict[str, Any]] = None,
         rng: Optional[np.random.Generator] = None,
     ) -> Run:
+        """Fit the model to data and return a Run.
+
+        Data inference rules (non-strict mode warns on ambiguity):
+        - tuples are payloads: (y, sigma), (y, lo, hi), (n, k), (alpha, beta)
+        - ragged batches require list inputs for both x and data
+        - lists otherwise are treated as array data when possible
+        - pass strict=True to raise on ambiguous inputs
+        """
         if rng is None:
             rng = np.random.default_rng()
         backend_options = dict(backend_options or {})

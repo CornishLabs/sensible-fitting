@@ -87,6 +87,35 @@ def prepare_datasets(
         yobs, sigma = _infer_gaussian_payload(data, strict)
         yobs = np.asarray(yobs, dtype=float)
 
+        if _x_matches_y_shape(x, yobs):
+            x_flat = _flatten_grid_x(x)
+            y_flat = np.asarray(yobs, dtype=float).reshape(-1)
+            sigma_flat = None
+            if sigma is not None:
+                sarr = np.asarray(sigma, dtype=float)
+                if sarr.shape == ():
+                    sigma_flat = float(sarr)
+                else:
+                    if sarr.shape != yobs.shape:
+                        sarr = np.broadcast_to(sarr, yobs.shape)
+                    sigma_flat = sarr.reshape(-1)
+            datasets.append(
+                Dataset(
+                    x=x_flat,
+                    format="normal",
+                    payload={"y": y_flat, "sigma": sigma_flat},
+                    y_for_seed=y_flat,
+                )
+            )
+            return datasets, ()
+
+        if _x_is_nd(x) and yobs.ndim > 1:
+            _warn_or_raise(
+                strict,
+                "ND x with y shape not matching x; treating leading y axes as batch. "
+                "If this is a 2D/ND dataset, flatten y (and x) explicitly.",
+            )
+
         if yobs.ndim == 1:
             datasets.append(
                 Dataset(
@@ -314,3 +343,28 @@ def _list_of_pairs(data: List[Any]) -> bool:
         if not (isinstance(item, (tuple, list)) and len(item) == 2):
             return False
     return True
+
+
+def _x_matches_y_shape(x: Any, y: np.ndarray) -> bool:
+    if isinstance(x, (tuple, list)) and x:
+        shapes = [np.asarray(xi).shape for xi in x]
+        return all(s == y.shape for s in shapes)
+    if isinstance(x, np.ndarray):
+        return x.shape == y.shape
+    return False
+
+
+def _x_is_nd(x: Any) -> bool:
+    if isinstance(x, np.ndarray):
+        return x.ndim > 1
+    if isinstance(x, (tuple, list)) and x:
+        return any(np.asarray(xi).ndim > 1 for xi in x)
+    return False
+
+
+def _flatten_grid_x(x: Any) -> Any:
+    if isinstance(x, (tuple, list)) and x:
+        return tuple(np.asarray(xi).reshape(-1) for xi in x)
+    if isinstance(x, np.ndarray):
+        return x.reshape(-1)
+    return x

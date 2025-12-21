@@ -34,7 +34,7 @@ def plot_fit(
     ax : matplotlib.axes.Axes, optional
         If None, a new figure/axes is created.
     x, y : array-like
-        Data to plot.
+        1D data to plot.
     yerr : array-like, optional
         Symmetric error bars. Scalar or array-like.
     run : Run, optional
@@ -71,12 +71,21 @@ def plot_fit(
 
     x_arr = np.asarray(x)
     y_arr = np.asarray(y)
+    if x_arr.ndim != 1 or y_arr.ndim != 1:
+        raise ValueError("plot_fit requires 1D x and y arrays.")
+    if x_arr.dtype == object or y_arr.dtype == object:
+        raise ValueError("plot_fit requires numeric 1D arrays.")
+    if x_arr.shape != y_arr.shape:
+        raise ValueError("plot_fit requires x and y to have the same shape.")
 
     if yerr is None:
         data_kwargs.setdefault("marker", "o")
         data_kwargs.setdefault("linestyle", "none")
         ax.plot(x_arr, y_arr, **data_kwargs)
     else:
+        yerr_arr = np.asarray(yerr)
+        if yerr_arr.shape not in ((), x_arr.shape):
+            raise ValueError("plot_fit requires yerr to be scalar or same shape as y.")
         data_kwargs.setdefault("fmt", "o")
         data_kwargs.setdefault("ms", 4)
         data_kwargs.setdefault("capsize", 2)

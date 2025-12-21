@@ -39,7 +39,7 @@ Dependencies are listed in `pyproject.toml`.
 ```py
 import numpy as np
 import matplotlib.pyplot as plt
-from sensible_fitting import Model
+from sensible_fitting import Model, plot_fit
 
 def line(x, m, b):
     return m * x + b
@@ -60,15 +60,17 @@ res = run.results
 print(res["m"].value, "±", res["m"].stderr)
 print(res["b"].value, "±", res["b"].stderr)
 
-xg = np.linspace(x.min(), x.max(), 400)
-yg = run.predict(xg)
-
-band = run.band(xg, level=2, nsamples=400)   # ~2σ band from covariance sampling
-
 fig, ax = plt.subplots()
-ax.errorbar(x, y, yerr=sigma, fmt="o", ms=4, capsize=2, label="data")
-ax.plot(xg, yg, label="fit")
-ax.fill_between(xg, band.low, band.high, alpha=0.2, label="~2σ band")
+plot_fit(
+    ax=ax,
+    x=x,
+    y=y,
+    yerr=sigma,
+    run=run,
+    band=True,
+    band_options={"level": 2, "nsamples": 400},
+    show_params=True,
+)
 ax.legend()
 plt.show()
 ```
@@ -162,6 +164,26 @@ Defaults are tuned for "just pass arrays," with warnings on ambiguity:
 run = model.fit(x, [y, sigma])             # warns, treated as batch data
 run = model.fit(x, (y, sigma))             # explicit payload, no warning
 run = model.fit(x, [y, sigma], strict=True)  # raises
+```
+
+---
+
+## Plotting helper
+
+For quick 1D plots, use `plot_fit` (it expects 1D `x` and `y`):
+
+```py
+fig, ax = plt.subplots()
+plot_fit(
+    ax=ax,
+    x=x,
+    y=y,
+    yerr=sigma,
+    run=run,
+    band=True,
+    band_options={"level": 2},
+    show_params=True,
+)
 ```
 
 ---
