@@ -235,6 +235,7 @@ def prepare_datasets(
 
 
 def _one_dataset(x: Any, data: Any, fmt: str, strict: bool) -> Dataset:
+    """Build a single Dataset from x/data for a given format."""
     if fmt == "normal":
         y, sigma = _infer_gaussian_payload(data, strict)
         y = np.asarray(y, dtype=float)
@@ -253,6 +254,7 @@ def _one_dataset(x: Any, data: Any, fmt: str, strict: bool) -> Dataset:
 
 
 def _safe_frac(num: np.ndarray, den: np.ndarray) -> np.ndarray:
+    """Safely compute num/den with zero handling."""
     num = np.asarray(num, dtype=float)
     den = np.asarray(den, dtype=float)
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -260,6 +262,7 @@ def _safe_frac(num: np.ndarray, den: np.ndarray) -> np.ndarray:
 
 
 def _infer_gaussian_payload(y: Any, strict: bool):
+    """Parse normal data payloads into (y, sigma)."""
     # y -> unweighted
     # (y, sigma) -> symmetric absolute errors
     # (y, sigma_low, sigma_high) -> approximate to mean sigma
@@ -280,6 +283,7 @@ def _infer_gaussian_payload(y: Any, strict: bool):
 
 
 def _infer_binomial_payload(y: Any):
+    """Parse binomial payload into (n, k) arrays."""
     if not (isinstance(y, (tuple, list)) and len(y) == 2):
         raise TypeError("binomial data expects y=(n_samples, n_successes).")
 
@@ -300,6 +304,7 @@ def _infer_binomial_payload(y: Any):
 
 
 def _infer_beta_payload(data: Any):
+    """Parse beta payload into (alpha, beta) arrays."""
     if not (isinstance(data, (tuple, list)) and len(data) == 2):
         raise TypeError("beta data expects data=(alpha, beta).")
 
@@ -321,22 +326,26 @@ def _infer_beta_payload(data: Any):
 
 
 def _warn_or_raise(strict: bool, message: str) -> None:
+    """Warn or raise based on strict mode."""
     if strict:
         raise ValueError(message)
     warn(message, UserWarning, stacklevel=2)
 
 
 def _list_all_scalars(data: List[Any]) -> bool:
+    """Return True if every element is scalar-like."""
     return all(_is_scalar_like(v) for v in data)
 
 
 def _is_scalar_like(v: Any) -> bool:
+    """Return True if v is a scalar or 0-d numpy array."""
     if isinstance(v, np.ndarray):
         return v.shape == ()
     return isinstance(v, (int, float, np.number, bool))
 
 
 def _list_of_pairs(data: List[Any]) -> bool:
+    """Return True if data is a list of 2-tuples/lists."""
     if not data:
         return False
     for item in data:
@@ -346,6 +355,7 @@ def _list_of_pairs(data: List[Any]) -> bool:
 
 
 def _x_matches_y_shape(x: Any, y: np.ndarray) -> bool:
+    """Return True if x shape(s) match y shape exactly."""
     if isinstance(x, (tuple, list)) and x:
         shapes = [np.asarray(xi).shape for xi in x]
         return all(s == y.shape for s in shapes)
@@ -355,6 +365,7 @@ def _x_matches_y_shape(x: Any, y: np.ndarray) -> bool:
 
 
 def _x_is_nd(x: Any) -> bool:
+    """Return True if x contains arrays with ndim > 1."""
     if isinstance(x, np.ndarray):
         return x.ndim > 1
     if isinstance(x, (tuple, list)) and x:
@@ -363,6 +374,7 @@ def _x_is_nd(x: Any) -> bool:
 
 
 def _flatten_grid_x(x: Any) -> Any:
+    """Flatten grid-like x into 1D coordinate arrays."""
     if isinstance(x, (tuple, list)) and x:
         return tuple(np.asarray(xi).reshape(-1) for xi in x)
     if isinstance(x, np.ndarray):

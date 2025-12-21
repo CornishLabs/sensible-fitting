@@ -27,6 +27,7 @@ class Results:
     stats: Dict[str, Any] = field(default_factory=dict)
 
     def __getitem__(self, key):
+        """Return ParamView(s) or a batch-sliced Results view."""
         # ---- Parameter access sugar ----------------------------------------
         # res["frequency"]           -> ParamView (all batches)
         # res["frequency", "phase"]  -> MultiParamView
@@ -48,6 +49,7 @@ class Results:
         
         # Slice backend stats in a conservative way.
         def _slice_stats(stats: Dict[str, Any], idx: Any) -> Dict[str, Any]:
+            """Slice only per-batch stats while preserving global keys."""
             if not stats:
                 return {}
             if "per_batch" not in stats:
@@ -70,6 +72,7 @@ class Results:
             return out
 
         def _slice(v):
+            """Slice an array-like along the batch index."""
             if v is None:
                 return None
             a = np.asarray(v)
@@ -158,6 +161,7 @@ class Results:
         )
 
     def summary(self, digits: int = 4) -> str:
+        """Return a human-readable summary string for the results."""
         lines = [f"Results(backend={self.backend!r}, batch_shape={self.batch_shape})"]
         if self.batch_shape == () and self.stats:
             if "logz" in self.stats:
@@ -229,6 +233,7 @@ class Run:
     message: Any = ""
 
     def squeeze(self) -> "Run":
+        """Return a scalar Run if batch size is 1; otherwise raise."""
         if self.results.batch_shape == ():
             return self
         batch_size = prod(self.results.batch_shape)
@@ -240,6 +245,7 @@ class Run:
         return self[idx]
 
     def __getitem__(self, idx) -> "Run":
+        """Return a Run for a batch slice."""
         sub_results = self.results[idx]
 
         sub_data = None
@@ -320,6 +326,7 @@ class Run:
         method: Literal["auto", "posterior", "covariance"] = "auto",
         rng: Optional[np.random.Generator] = None,
     ) -> Band:
+        """Compute a predictive band for the model at x."""
         if self.results.batch_shape != ():
             raise ValueError(
                 "run.band() requires a scalar run. Slice first (e.g., run[i].band(...))."
@@ -413,6 +420,7 @@ class Run:
 
 
 def _normalize_ragged_index(idx: Any) -> Any:
+    """Normalize ragged batch indices to 1D indexing."""
     # Ragged batches are 1D (list-of-datasets). squeeze() uses idx=(0,).
     if isinstance(idx, tuple):
         if len(idx) == 1:
@@ -422,6 +430,7 @@ def _normalize_ragged_index(idx: Any) -> Any:
 
 
 def _index_ragged_list(v: list[Any], idx: Any) -> Any:
+    """Index a ragged list with int/slice/bool/array indices."""
     idx = _normalize_ragged_index(idx)
 
     if isinstance(idx, (int, slice)):

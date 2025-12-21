@@ -1,6 +1,6 @@
 import pytest
 
-from sensible_fitting.util import uncertainty_to_string
+from sensible_fitting.viz import uncertainty_to_string
 
 
 @pytest.mark.parametrize(

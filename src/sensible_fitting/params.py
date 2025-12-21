@@ -67,12 +67,14 @@ class _UncContext:
     )
 
     def _normalized_cov(self) -> Optional[np.ndarray]:
+        """Return covariance with scalar object arrays unwrapped."""
         cov = self.cov
         if isinstance(cov, np.ndarray) and cov.dtype == object and cov.shape == ():
             cov = cov.item()
         return cov
 
     def _batch_shape(self, cov: Optional[np.ndarray]) -> Tuple[int, ...]:
+        """Infer batch shape from a covariance container."""
         if cov is None or not isinstance(cov, np.ndarray):
             return ()
         if cov.dtype == object:
@@ -82,6 +84,7 @@ class _UncContext:
         return cov.shape[:-2]
 
     def _value_at(self, name: str, idx: Optional[Tuple[int, ...]] = None) -> float:
+        """Return the numeric value for a parameter at an optional batch index."""
         v = np.asarray(self.values[name])
         if idx is None:
             if v.shape == ():
@@ -90,6 +93,7 @@ class _UncContext:
         return float(v[idx])
 
     def _stderr_at(self, name: str, idx: Optional[Tuple[int, ...]] = None) -> Optional[float]:
+        """Return the numeric stderr for a parameter at an optional batch index."""
         e = self.stderrs.get(name)
         if e is None:
             return None
@@ -101,6 +105,7 @@ class _UncContext:
         return float(a[idx])
 
     def _build_scalar_cache(self) -> None:
+        """Populate correlated ufloats for a scalar (non-batched) result."""
         if self._cache_scalar is not None or uncertainties is None:
             return
         cov = self._normalized_cov()
@@ -123,6 +128,7 @@ class _UncContext:
         self._cache_scalar = dict(zip(self.free_names, corr))
 
     def _build_batch_cache(self) -> None:
+        """Populate correlated ufloats for a batched result."""
         if self._cache_batch is not None or uncertainties is None:
             return
         cov = self._normalized_cov()
@@ -158,6 +164,7 @@ class _UncContext:
         self._cache_batch = out
 
     def u_for(self, name: str) -> Optional[Any]:
+        """Return a correlated ufloat for a parameter if available."""
         if uncertainties is None or name not in self.free_names:
             return None
         cov = self._normalized_cov()
@@ -173,6 +180,7 @@ class _UncContext:
         return self._cache_batch.get(name)
 
     def u_for_many(self, names: Sequence[str]) -> Optional[np.ndarray]:
+        """Return correlated ufloats for multiple parameters if available."""
         if uncertainties is None:
             return None
         names = tuple(names)
@@ -208,6 +216,7 @@ class ParamView:
     # Backwards-compatible alias
     @property
     def error(self) -> Any:  # type: ignore[override]
+        """Alias for stderr."""
         return self.stderr
 
     @property
@@ -239,6 +248,7 @@ class ParamView:
         return unp.uarray(self.value, e)
 
     def __getitem__(self, key: str) -> Any:
+        """Dict-like access to ParamView fields."""
         if key == "value":
             return self.value
         if key in ("error", "stderr"):
@@ -268,6 +278,7 @@ class MultiParamView:
 
     @property
     def u(self):
+        """Return an uncertainties array with correlated errors if available."""
         if self.stderr is None:
             raise ValueError("No stderr available for MultiParamView.u.")
         if unp is None:
@@ -300,11 +311,13 @@ class ParamsView(Mapping[str, ParamView]):
         *,
         _context: Optional[_UncContext] = None,
     ):
+        """Create a ParamsView with optional correlation context."""
         self._items = dict(items)
         self._names = tuple(self._items.keys())
         self._context = _context
 
     def __getitem__(self, key):  # type: ignore[override]
+        """Return ParamView or MultiParamView via rich indexing."""
         # Param by name
         if isinstance(key, str):
             return self._items[key]
@@ -340,12 +353,15 @@ class ParamsView(Mapping[str, ParamView]):
         raise KeyError(key)
 
     def __iter__(self):
+        """Iterate over parameter names."""
         return iter(self._items)
 
     def __len__(self):
+        """Return number of parameters."""
         return len(self._items)
 
     def items(self):
+        """Return items() from the underlying mapping."""
         return self._items.items()
 
     def as_dict(self) -> Dict[str, Any]:
@@ -354,6 +370,7 @@ class ParamsView(Mapping[str, ParamView]):
 
     # ---- helpers ----
     def _multi_by_names(self, names: Sequence[str]) -> MultiParamView:
+        """Build a MultiParamView from a list of parameter names."""
         names = tuple(names)
         if not names:
             raise ValueError("MultiParamView requires at least one parameter name.")
@@ -399,15 +416,18 @@ class GuessState:
     """
 
     def __init__(self):
+        """Create a new, empty guess state."""
         object.__setattr__(self, "_d", {})
 
     def __getattr__(self, name: str) -> Any:
+        """Return a guessed value or raise AttributeError."""
         d = object.__getattribute__(self, "_d")
         if name in d:
             return d[name]
         raise AttributeError(name)
 
     def __setattr__(self, name: str, value: Any) -> None:
+        """Set a guessed value on this state."""
         if name == "_d":
             object.__setattr__(self, name, value)
             return
@@ -415,8 +435,10 @@ class GuessState:
         d[name] = value
 
     def is_unset(self, name: str) -> bool:
+        """Return True if a guessed value has not been set."""
         d = object.__getattribute__(self, "_d")
         return name not in d
 
     def to_dict(self) -> Dict[str, Any]:
+        """Return the guess state as a plain dict."""
         return dict(object.__getattribute__(self, "_d"))

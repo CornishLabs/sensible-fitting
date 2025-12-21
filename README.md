@@ -39,7 +39,8 @@ Dependencies are listed in `pyproject.toml`.
 ```py
 import numpy as np
 import matplotlib.pyplot as plt
-from sensible_fitting import Model, plot_fit
+from sensible_fitting import Model
+from sensible_fitting.viz import plot_fit
 
 def line(x, m, b):
     return m * x + b
@@ -170,7 +171,7 @@ run = model.fit(x, [y, sigma], strict=True)  # raises
 
 ## Plotting helper
 
-For quick 1D plots, use `plot_fit` (it expects 1D `x` and `y`):
+For quick 1D plots, use `plot_fit` from `sensible_fitting.viz` (it expects 1D `x` and `y`):
 
 ```py
 fig, ax = plt.subplots()

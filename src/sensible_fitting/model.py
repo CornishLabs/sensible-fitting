@@ -46,6 +46,7 @@ class Model:
     def from_function(
         func: Callable[..., Any], *, name: Optional[str] = None
     ) -> "Model":
+        """Construct a Model from a plain function signature."""
         names = infer_param_names(func)
 
         # Treat numeric defaults in the function signature as default guesses.
@@ -72,6 +73,7 @@ class Model:
     def eval(
         self, x: Any, *, params: Optional[Mapping[str, Any]] = None, **kwargs
     ) -> Any:
+        """Evaluate the model function at x with given parameters."""
         values: Dict[str, Any] = {}
 
         if params is not None:
@@ -104,6 +106,7 @@ class Model:
 
     # ---- builders (pure; return new model) ----
     def fix(self, **fixed: float) -> "Model":
+        """Return a new Model with parameters fixed to values."""
         m = {p.name: p for p in self.params}
         for k, v in fixed.items():
             if k not in m:
@@ -112,6 +115,7 @@ class Model:
         return replace(self, params=tuple(m[n] for n in self.param_names))
 
     def bound(self, **bounds: Tuple[Optional[float], Optional[float]]) -> "Model":
+        """Return a new Model with parameter bounds applied."""
         m = {p.name: p for p in self.params}
         for k, b in bounds.items():
             if k not in m:
@@ -121,6 +125,7 @@ class Model:
         return replace(self, params=tuple(m[n] for n in self.param_names))
 
     def guess(self, **guesses: float) -> "Model":
+        """Return a new Model with strong parameter guesses."""
         m = {p.name: p for p in self.params}
         for k, g in guesses.items():
             if k not in m:
@@ -142,6 +147,7 @@ class Model:
         return replace(self, params=tuple(m[n] for n in self.param_names))
 
     def prior(self, **priors: Tuple[str, Any]) -> "Model":
+        """Return a new Model with Bayesian priors set for parameters."""
         m = {p.name: p for p in self.params}
         for k, p in priors.items():
             if k not in m:
@@ -166,6 +172,7 @@ class Model:
     def derive(
         self, name: str, func: Callable[[Mapping[str, float]], float], *, doc: str = ""
     ) -> "Model":
+        """Return a new Model with a post-fit derived parameter."""
         if name in self.param_names:
             raise ValueError(
                 f"Derived name {name!r} conflicts with an existing parameter."
@@ -509,6 +516,7 @@ class Model:
 
 
 def _spec_by_name(params: Tuple[ParameterSpec, ...], name: str) -> ParameterSpec:
+    """Return the ParameterSpec with a matching name."""
     for p in params:
         if p.name == name:
             return p
@@ -518,6 +526,7 @@ def _spec_by_name(params: Tuple[ParameterSpec, ...], name: str) -> ParameterSpec
 def _free_and_fixed(
     params: Tuple[ParameterSpec, ...]
 ) -> Tuple[List[str], Dict[str, float]]:
+    """Split parameters into free names and fixed name->value mapping."""
     free: List[str] = []
     fixed: Dict[str, float] = {}
     for p in params:
@@ -533,6 +542,7 @@ def _free_and_fixed(
 def _bounds_for_free(
     params: Tuple[ParameterSpec, ...], free_names: List[str]
 ) -> Tuple[np.ndarray, np.ndarray]:
+    """Return (lo, hi) arrays of bounds for free parameters."""
     pmap = {p.name: p for p in params}
     lo: List[float] = []
     hi: List[float] = []

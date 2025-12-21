@@ -1,7 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-from sensible_fitting import Model, plot_fit
+from sensible_fitting import Model
+from sensible_fitting.viz import plot_fit
 
 
 def line(x, m, b):
