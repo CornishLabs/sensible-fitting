@@ -38,7 +38,7 @@ def main() -> None:
 
     model = (
         Model.from_function(gauss2d, name="gauss2d")
-        .bound(amp=(0.0, None), sx=(0.1, 5.0), sy=(0.1, 5.0))
+        .bound(amp=(0.0, 5.0), sx=(0.1, 5.0), sy=(0.1, 5.0), x0=(-10,10),y0=(-10,10),offset=(-1,1))
         .guess(amp=1.5, x0=0.0, y0=0.0, sx=1.0, sy=1.0, offset=0.0)
     )
 

@@ -59,3 +59,26 @@ def test_nd_x_matches_y_shape_single_dataset():
     assert batch_shape == ()
     assert len(datasets) == 1
     assert datasets[0].payload["y"].shape == (Z.size,)
+
+
+def test_binomial_payload_broadcasts_scalar_n():
+    x = np.arange(5)
+    n = 10
+    k = np.array([2, 3, 4, 5, 6])
+
+    datasets, batch_shape = prepare_datasets(x, (n, k), "binomial", strict=False)
+
+    assert batch_shape == ()
+    assert len(datasets) == 1
+    payload = datasets[0].payload
+    assert payload["n"].shape == k.shape
+    assert payload["k"].shape == k.shape
+
+
+def test_binomial_payload_invalid_raises():
+    x = np.arange(3)
+    n = np.array([5, 5, 5])
+    k = np.array([1, 7, 2])
+
+    with pytest.raises(ValueError, match="require 0 <= n_successes <= n_samples"):
+        prepare_datasets(x, (n, k), "binomial", strict=False)

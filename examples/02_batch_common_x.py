@@ -6,7 +6,7 @@ model = (
     models.sinusoid(name="wave")
     .fix(offset=0.0, phase=np.pi / 3)
     .bound(amplitude=(0.2, 5.0), frequency=(1.0, 6.0))
-    .guess(frequency=2.8)
+    .guess(frequency=2.9)
 )
 
 rng = np.random.default_rng(2)
