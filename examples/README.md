@@ -32,8 +32,8 @@ Notes:
 - `examples/17_ramsey_multimodal.py` — multimodal Ramsey posterior + posterior sample curves + next-point suggestion.
 - `examples/18_sequential_design.py` — sequential design loop for a Ramsey-style sinusoid.
 - `examples/19_sequential_gaussian.py` — sequential design loop for a Gaussian spectral feature.
+- `examples/20_plot_panels.py` — diagnostic panels: next-point score (top) + residuals (bottom).
 
 ## Helper scripts
 
 - `examples/ultranest_sanity.py` — standalone UltraNest sanity check (writes logs under `ultranest_sanity_run/`).
-

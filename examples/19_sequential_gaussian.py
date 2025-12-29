@@ -48,7 +48,7 @@ added = []  # (x_new, y_new) per transition
 xg = np.linspace(xmin, xmax, 800)
 
 for r in range(rounds):
-    run = model.fit(data.with_labels(label=f"round {r+1}"), backend="ultranest").squeeze()
+    run = model.fit(data.with_labels(label=f"round {r+1}"), backend="scipy.curve_fit").squeeze()
     runs.append(run)
 
     if r == rounds - 1:

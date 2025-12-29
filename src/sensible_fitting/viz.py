@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Callable, Mapping, Optional, Sequence, Tuple, Literal
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple, Literal
 from warnings import warn
 
 import numpy as np
@@ -299,6 +299,11 @@ def plot_run(
     posterior_lines_kwargs: Optional[Mapping[str, Any]] = None,
     which: Literal["auto", "fit", "seed"] = "auto",
     xg: Optional[np.ndarray] = None,
+    residuals: bool = False,
+    nextpoint: bool = False,
+    nextpoint_options: Optional[Mapping[str, Any]] = None,
+    nextpoint_kwargs: Optional[Mapping[str, Any]] = None,
+    return_axes: bool = False,
     band_options: Optional[Mapping[str, Any]] = None,
     band_kwargs: Optional[Mapping[str, Any]] = None,
     data_kwargs: Optional[Mapping[str, Any]] = None,
@@ -320,6 +325,8 @@ def plot_run(
     - plots the fitted curve (or seed curve if optimise=False),
     - plots an uncertainty band when available,
     - optionally overlays semi-transparent posterior sample curves,
+    - optionally shows a next-point score panel (top),
+    - optionally shows a residuals panel (bottom),
     - sets the Axes title to a compact parameter summary.
 
     For batched runs, pass `axs` (an array-like of Matplotlib axes) to plot each
@@ -331,12 +338,27 @@ def plot_run(
 
     each:
       For batched runs, call `each(ax, subrun, idx)` after drawing each subplot.
+
+    residuals:
+      If True, add a small residuals panel below the main plot (scalar runs only).
+
+    nextpoint:
+      If True, add a small panel above the main plot showing the score used by
+      `Run.suggest_next_x(...)` (scalar runs only).
+
+    return_axes:
+      If True, return a dict of axes (keys: "main", optionally "nextpoint"/"residuals")
+      instead of just the main Axes.
     """
     if axs is not None and ax is not None:
         raise ValueError("Provide only one of ax= or axs=.")
 
     batch_shape = tuple(getattr(getattr(run, "results", None), "batch_shape", ()))
     if batch_shape != ():
+        if residuals or nextpoint:
+            raise ValueError(
+                "residuals/nextpoint panels require a scalar run; slice first (e.g., run[i].plot(...))."
+            )
         if axs is None:
             # Sensible default layout if the caller didn't provide axes.
             import matplotlib.pyplot as plt
@@ -492,14 +514,60 @@ def plot_run(
     band_options.setdefault("level", 2.0)
     band_options.setdefault("nsamples", 400)
 
+    # Default plotting grid for the model line/band and the nextpoint score.
+    xg_use = xg
+    if xg_use is None and (line or band_use or bool(posterior_lines) or nextpoint):
+        xg_use = np.linspace(float(np.min(x)), float(np.max(x)), 400)
+
+    panel_axes: Dict[str, Any] = {}
+    ax_main = ax
+    ax_next = None
+    ax_resid = None
+
+    if residuals or nextpoint:
+        if ax is not None:
+            raise ValueError(
+                "residuals/nextpoint panels currently require ax=None (a new figure will be created)."
+            )
+        import matplotlib.pyplot as plt
+
+        if residuals and nextpoint:
+            fig, (ax_next, ax_main, ax_resid) = plt.subplots(
+                3,
+                1,
+                sharex=True,
+                constrained_layout=True,
+                gridspec_kw={"height_ratios": [1.0, 4.0, 1.0]},
+            )
+            panel_axes["nextpoint"] = ax_next
+            panel_axes["residuals"] = ax_resid
+        elif nextpoint:
+            fig, (ax_next, ax_main) = plt.subplots(
+                2,
+                1,
+                sharex=True,
+                constrained_layout=True,
+                gridspec_kw={"height_ratios": [1.0, 4.0]},
+            )
+            panel_axes["nextpoint"] = ax_next
+        else:
+            fig, (ax_main, ax_resid) = plt.subplots(
+                2,
+                1,
+                sharex=True,
+                constrained_layout=True,
+                gridspec_kw={"height_ratios": [4.0, 1.0]},
+            )
+            panel_axes["residuals"] = ax_resid
+
     fig, ax = plot_fit(
-        ax=ax,
+        ax=ax_main,
         x=x,
         y=y,
         yerr=yerr_use,
         run=(run if (line or band_use or bool(posterior_lines)) else None),
         which=which_use,
-        xg=xg,
+        xg=xg_use,
         data=data,
         line=line,
         band=band_use,
@@ -512,6 +580,8 @@ def plot_run(
         show_params=False,
     )
 
+    panel_axes["main"] = ax
+
     _apply_title(
         ax=ax,
         run=run,
@@ -522,12 +592,115 @@ def plot_run(
         title_kwargs=title_kwargs,
     )
 
-    _apply_axis_labels(
-        ax=ax,
-        x_label=(x_label if x_label is not None else meta.get("x_label")),
-        y_label=(y_label if y_label is not None else meta.get("y_label")),
-    )
+    # ---- optional panels ----------------------------------------------------
+    if nextpoint and ax_next is not None:
+        nextpoint_options_use = dict(nextpoint_options or {})
+        # Prefer plotting the score over the same grid the user sees.
+        candidates = nextpoint_options_use.pop("candidates", xg_use)
+        nextpoint_options_use.pop("return_details", None)
 
+        suggest = None
+        try:
+            suggest = run.suggest_next_x(
+                candidates=candidates,
+                return_details=True,
+                **nextpoint_options_use,
+            )
+        except Exception as exc:
+            warn(f"plot_run: could not compute next-point score: {exc}", UserWarning)
+
+        if suggest is None:
+            ax_next.text(
+                0.5,
+                0.5,
+                "next-point score unavailable",
+                ha="center",
+                va="center",
+                transform=ax_next.transAxes,
+            )
+            ax_next.set_yticks([])
+        else:
+            nextpoint_kwargs_use = dict(nextpoint_kwargs or {})
+            nextpoint_kwargs_use.setdefault("color", "C2")
+            nextpoint_kwargs_use.setdefault("lw", 1.5)
+            nextpoint_kwargs_use.setdefault("label", "next-point score")
+
+            ax_next.plot(suggest.candidates, suggest.score, **nextpoint_kwargs_use)
+            for i, xv in enumerate(np.atleast_1d(np.asarray(suggest.x, dtype=float)).tolist()):
+                ax_next.axvline(
+                    float(xv),
+                    color=nextpoint_kwargs_use.get("color", "C2"),
+                    lw=1.0,
+                    alpha=0.8,
+                    linestyle="--",
+                    label=("suggested x" if i == 0 else "_nolegend_"),
+                )
+                # Also mark on the main plot to make it easy to interpret.
+                ax.axvline(
+                    float(xv),
+                    color=nextpoint_kwargs_use.get("color", "C2"),
+                    lw=1.0,
+                    alpha=0.25,
+                    linestyle="--",
+                    label="_nolegend_",
+                )
+
+            if suggest.objective == "info_gain":
+                ax_next.set_ylabel("info gain")
+            elif suggest.objective == "max_width":
+                ax_next.set_ylabel("band width")
+            elif suggest.objective == "max_var":
+                ax_next.set_ylabel("variance")
+            else:
+                ax_next.set_ylabel("score")
+            ax_next.grid(True, alpha=0.2)
+            ax_next.legend(loc="best", fontsize=8)
+            ax_next.tick_params(labelbottom=False)
+
+    if residuals and ax_resid is not None:
+        try:
+            y_pred = np.asarray(run.predict(x, which=which_use), dtype=float)
+            resid = np.asarray(y, dtype=float) - y_pred
+            ax_resid.axhline(0.0, color="0.3", lw=1.0, zorder=0)
+            if yerr_use is not None:
+                ax_resid.errorbar(
+                    np.asarray(x, dtype=float),
+                    resid,
+                    yerr=yerr_use,
+                    fmt="o",
+                    ms=3,
+                    capsize=2,
+                    color="0.2",
+                )
+            else:
+                ax_resid.plot(np.asarray(x, dtype=float), resid, "o", ms=3, color="0.2")
+            ax_resid.set_ylabel("resid")
+            ax_resid.grid(True, alpha=0.2)
+            ax.tick_params(labelbottom=False)
+        except Exception as exc:
+            warn(f"plot_run: could not compute residuals: {exc}", UserWarning)
+            ax_resid.text(
+                0.5,
+                0.5,
+                "residuals unavailable",
+                ha="center",
+                va="center",
+                transform=ax_resid.transAxes,
+            )
+            ax_resid.set_yticks([])
+
+    # ---- axis labels --------------------------------------------------------
+    x_label_use = x_label if x_label is not None else meta.get("x_label")
+    y_label_use = y_label if y_label is not None else meta.get("y_label")
+
+    _apply_axis_labels(ax=ax, x_label=None if residuals else x_label_use, y_label=y_label_use)
+    if ax_resid is not None:
+        _apply_axis_labels(ax=ax_resid, x_label=x_label_use, y_label=None)
+    if ax_next is not None:
+        _apply_axis_labels(ax=ax_next, x_label=None, y_label=None)
+
+    if return_axes:
+        return fig, panel_axes
     return fig, ax
 
 
