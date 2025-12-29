@@ -258,6 +258,10 @@ class Model:
         - ragged batches require list inputs for both x and data
         - lists otherwise are treated as array data when possible
         - pass strict=True to raise on ambiguous inputs
+
+        Backend notes:
+        - scipy.minimize supports cov_method="auto" (use hess_inv if available, else numdiff)
+        - cov_method="numdiff" is more robust for non-Gaussian likelihoods
         """
         if rng is None:
             rng = np.random.default_rng()
@@ -271,9 +275,13 @@ class Model:
             backend = "scipy.minimize"
 
         # Enforce current capability boundaries clearly.
-        if data_format in ("binomial", "beta") and backend != "scipy.minimize":
+        if data_format == "binomial" and backend not in ("scipy.minimize", "ultranest"):
             raise NotImplementedError(
-                "v1: non-Gaussian data currently requires backend='scipy.minimize'."
+                "v1: binomial data currently requires backend='scipy.minimize' or 'ultranest'."
+            )
+        if data_format == "beta" and backend != "scipy.minimize":
+            raise NotImplementedError(
+                "v1: beta data currently requires backend='scipy.minimize'."
             )
 
         datasets, batch_shape = prepare_datasets(x, data, data_format, strict)
@@ -451,13 +459,66 @@ class Model:
 
         # Post-fit derived params (v1): depend only on fitted params
         if self.derived:
+            try:
+                import uncertainties  # type: ignore
+            except Exception:  # pragma: no cover - optional dependency
+                uncertainties = None
+
+            def _can_use_uncertainties() -> bool:
+                if uncertainties is None:
+                    return False
+                for spec in self.params:
+                    if spec.fixed:
+                        continue
+                    pv = results.params[spec.name]
+                    err = pv.stderr
+                    if err is None:
+                        return False
+                    a = np.asarray(err)
+                    if a.dtype == object:
+                        if any(v is None for v in a.ravel().tolist()):
+                            return False
+                        a = a.astype(float)
+                    if not np.all(np.isfinite(a)):
+                        return False
+                return True
+
+            use_uncertainties = _can_use_uncertainties()
             if results.batch_shape == ():
                 base = {n: float(results.params[n].value) for n in self.param_names}
+                base_unc = None
+                if use_uncertainties:
+                    base_unc = {}
+                    for spec in self.params:
+                        pv = results.params[spec.name]
+                        if spec.fixed:
+                            base_unc[spec.name] = float(pv.value)
+                        else:
+                            try:
+                                base_unc[spec.name] = pv.u
+                            except Exception:
+                                base_unc = None
+                                use_uncertainties = False
+                                break
                 extra = {}
                 for d in self.derived:
-                    dv = float(d.func(base))
+                    if use_uncertainties and base_unc is not None:
+                        dv = d.func(base_unc)
+                        if hasattr(dv, "nominal_value") and hasattr(dv, "std_dev"):
+                            dv_val = float(dv.nominal_value)
+                            dv_err = float(dv.std_dev)
+                        else:
+                            dv_val = float(dv)
+                            dv_err = None
+                    else:
+                        dv_val = float(d.func(base))
+                        dv_err = None
                     extra[d.name] = ParamView(
-                        name=d.name, value=dv, stderr=None, fixed=True, derived=True
+                        name=d.name,
+                        value=dv_val,
+                        stderr=dv_err,
+                        fixed=True,
+                        derived=True,
                     )
                 results = replace(
                     results,
@@ -473,16 +534,54 @@ class Model:
                     n: np.asarray(results.params[n].value).reshape((batch_size,))
                     for n in self.param_names
                 }
+                flat_unc = None
+                if use_uncertainties:
+                    flat_unc = {}
+                    for spec in self.params:
+                        pv = results.params[spec.name]
+                        if spec.fixed:
+                            flat_unc[spec.name] = np.asarray(pv.value).reshape((batch_size,))
+                        else:
+                            try:
+                                uarr = pv.u
+                            except Exception:
+                                flat_unc = None
+                                use_uncertainties = False
+                                break
+                            flat_unc[spec.name] = np.asarray(uarr, dtype=object).reshape(
+                                (batch_size,)
+                            )
                 extra_items = {}
                 for d in self.derived:
                     out = np.empty((batch_size,), dtype=float)
+                    err_out = None
+                    if use_uncertainties:
+                        err_out = np.empty((batch_size,), dtype=object)
                     for i in range(batch_size):
-                        base = {n: float(flat_vals[n][i]) for n in self.param_names}
-                        out[i] = float(d.func(base))
+                        if use_uncertainties and flat_unc is not None:
+                            base = {n: flat_unc[n][i] for n in self.param_names}
+                            dv = d.func(base)
+                            if hasattr(dv, "nominal_value") and hasattr(dv, "std_dev"):
+                                out[i] = float(dv.nominal_value)
+                                err_out[i] = float(dv.std_dev)
+                            else:
+                                out[i] = float(dv)
+                                err_out[i] = None
+                        else:
+                            base = {n: float(flat_vals[n][i]) for n in self.param_names}
+                            out[i] = float(d.func(base))
+                    stderr_val = None
+                    if use_uncertainties and err_out is not None:
+                        if any(v is None for v in err_out.tolist()):
+                            stderr_val = unflatten_batch(err_out, results.batch_shape)
+                        else:
+                            stderr_val = unflatten_batch(
+                                err_out.astype(float), results.batch_shape
+                            )
                     extra_items[d.name] = ParamView(
                         name=d.name,
                         value=unflatten_batch(out, results.batch_shape),
-                        stderr=None,
+                        stderr=stderr_val,
                         fixed=True,
                         derived=True,
                     )

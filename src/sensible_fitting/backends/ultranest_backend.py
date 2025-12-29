@@ -2,7 +2,7 @@ from typing import Any, Dict, Optional, Tuple
 import tempfile
 
 import numpy as np 
-from ..inference import build_gaussian_loglike, build_prior_transform
+from ..inference import build_gaussian_loglike, build_prior_transform, neg_loglike_binomial
 from .common import BackendResult
 
 class UltraNestBackend:
@@ -19,13 +19,16 @@ class UltraNestBackend:
         bounds: Tuple[np.ndarray, np.ndarray],
         options: dict[str, Any],
     ) -> BackendResult:
-        if getattr(dataset, "format", None) != "normal":
-            raise NotImplementedError("ultranest backend supports only data_format='normal'.")
+        fmt = getattr(dataset, "format", None)
+        if fmt not in ("normal", "binomial"):
+            raise NotImplementedError(
+                "ultranest backend supports data_format in {'normal','binomial'}."
+            )
 
         payload: Dict[str, Any] = dict(getattr(dataset, "payload"))
         x = getattr(dataset, "x")
-        y = np.asarray(payload["y"], dtype=float)
-        sigma = payload.get("sigma", None)
+        y = np.asarray(payload["y"], dtype=float) if fmt == "normal" else None
+        sigma = payload.get("sigma", None) if fmt == "normal" else None
         sigma_arr = None if sigma is None else np.asarray(sigma, dtype=float)
 
         # Backend options parsing/merging lives HERE (not in Model.fit).
@@ -49,15 +52,40 @@ class UltraNestBackend:
         ]
 
         transform = build_prior_transform(getattr(model, "params"), free_names)
-        loglike = build_gaussian_loglike(
-            model=model,
-            x=x,
-            y=y,
-            sigma=sigma_arr,
-            fixed_map=fixed_map,
-            free_names=free_names,
-            vectorized=vectorized,
-        )
+        if fmt == "normal":
+            loglike = build_gaussian_loglike(
+                model=model,
+                x=x,
+                y=y,
+                sigma=sigma_arr,
+                fixed_map=fixed_map,
+                free_names=free_names,
+                vectorized=vectorized,
+            )
+        else:
+            n = np.asarray(payload["n"], dtype=float)
+            k = np.asarray(payload["k"], dtype=float)
+
+            def _one(theta_free: np.ndarray) -> float:
+                kw = dict(fixed_map)
+                for j, name in enumerate(free_names):
+                    kw[name] = float(theta_free[j])
+                p = np.asarray(model.eval(x, **kw), dtype=float)
+                p = np.broadcast_to(p, k.shape)
+                return float(-neg_loglike_binomial(p, n, k))
+
+            if not vectorized:
+                loglike = _one
+            else:
+                def _many(thetas: np.ndarray) -> np.ndarray:
+                    thetas = np.asarray(thetas, dtype=float)
+                    if thetas.ndim == 1:
+                        return np.asarray(_one(thetas), dtype=float)
+                    out = np.empty((thetas.shape[0],), dtype=float)
+                    for i in range(thetas.shape[0]):
+                        out[i] = _one(thetas[i])
+                    return out
+                loglike = _many
 
         fallback_theta = np.asarray(p0, dtype=float)
 

@@ -1,299 +1,90 @@
-# To the AI LLM reading this
-
-Here is a list of improvements we've discussed. I'm keeping them here so they don't get lost.
-
-# My improvement list:
-- Made the .u view of the params correctly use the correlations from the cov matrix returned.
-- Add plotting helpers.
-- Add tests
-
-# Improvements
-
-
-This is a **fantastic** start. You have built something that sits in a very sweet spot: lighter and cleaner than `lmfit`, but significantly more powerful and structured than raw `scipy.optimize`.
-
-As an experimentalist who has written similar "lab-glue" code, I strongly resonate with the design philosophy here. The builder pattern (`.bound().guess()`) is delightful, and the focus on "Seeding as a First-Class Citizen" solves the #1 pain point of curve fitting.
-
-Here is a review of the ergonomics, a comparison to the ecosystem, and concrete suggestions for improvement.
-
----
-
-### 1. Comparison to Other Libraries
-
-| Feature | `scipy.optimize` | `lmfit` | `sensible-fitting` (Yours) |
-| :--- | :--- | :--- | :--- |
-| **API Style** | Raw functions & arrays | Stateful objects (`params.add`) | **Immutable Builder** (`model.bound()`) |
-| **Seeding** | Manual `p0` array | Baked-in `guess()`, hard to debug | **Explicit pipeline** (Run with `optimise=False`) |
-| **Batching** | Manual loops | Iterators (slow/manual) | **Native Tensor/List support** |
-| **Ergonomics** | Low (index hell) | Medium (verbose dicts) | **High** (Pandas-like indexing, succinct) |
-
-**Verdict:** Your library feels more "modern" than `lmfit`. `lmfit` carries a lot of legacy baggage. Your usage of **immutable builders** is the killer feature—it makes fitting pipelines declarative and reusable, which is safer for Jupyter Notebook workflows where global state often causes bugs.
-
----
-
-### 2. Ergonomics & API Feedback
-
-#### The Good
-1.  **The Builder Pattern:** `Model.from_function(f).bound(...).guess(...)` is extremely readable. It reads like an English sentence describing the physics.
-2.  **`run.predict(..., which="seed")`:** This is brilliant. Visualizing the seed is the only way to debug a bad fit. Making it a toggle on the result object is excellent ergonomics.
-3.  **Ragged Batching:** Handling `list[x_arrays]` vs `list[y_arrays]` automatically is a huge quality-of-life improvement for experimentalists who don't want to pad arrays with NaNs.
-
-#### The "Needs Tweaking"
-1.  **Ambiguous Indexing (`res[0]`):**
-    In `examples/07_results_indexing.py`:
-    ```python
-    res[0]          # Batch slice
-    res.params[0]   # Parameter by index
-    ```
-    This is risky. If I have a scalar fit (batch_shape=()), `res[0]` raises an IndexError, but `res.params[0]` returns the first parameter. Users might confuse batch indexing with parameter indexing.
-    *Suggestion:* Consider making `res[...]` *always* about batching, and force parameter access through strings or `res.params[...]`.
-
-2.  **Derived Parameters vs. Constraints:**
-    Currently, `derive` happens *post-fit*. A common requirement in AMO is **Algebraic Constraints** during fitting.
-    *Example:* Fitting a Rabi flopping curve where you know `decay_rate = gamma * frequency`.
-    *Current:* You'd likely have to rewrite the python function.
-    *Improvement:* Allow `fix(decay_rate="0.1 * frequency")`. This requires parsing, which is hard, but it's `lmfit`'s strongest feature. If you don't want string parsing, perhaps `model.constrain(decay_rate=lambda p: 0.1 * p['frequency'])`.
-
----
-
-### 3. Concrete Improvements (Code Level)
-
-#### A. Performance: Vectorized Objectives for Batching
-In `model.py`, inside `fit()`, you iterate over datasets for `scipy.minimize`:
-```python
-# Current implementation loops in Python
-for i, ds in enumerate(datasets):
-    ...
-    r = fit_minimize(...)
-```
-**Critique:** If I have 1,000 pixels (batches) from a camera image, this Python loop will be slow.
-**Fix:** For the `scipy.minimize` backend, implement a **Vectorized Objective**. You can flatten all batches into one giant parameter vector and sum the log-likelihoods. This pushes the loop into compiled Scipy/C code.
-*Note: This is hard because `minimize` expects a scalar loss, but you can sum the losses. The gradient calculation is where you save time.*
-
-#### B. The "Global Parameter" Problem (Crucial for AMO)
-This is the feature that will make people switch to your library.
-**Scenario:** You take a frequency scan at 5 different laser powers.
-*   `frequency`: Shared (Global) across all 5 datasets.
-*   `amplitude`: Varies per dataset.
-
-Currently, your batching fits 5 independent models.
-**Suggestion:** Add a mechanism to link parameters across the batch dimension.
-```python
-# API Idea
-run = model.fit(x, ys, shared=["frequency", "phase"])
-```
-*Implementation:* Internally, you effectively reshape the optimization problem. Instead of $N \times M$ parameters, you optimise $M_{shared} + N \times M_{local}$ parameters. This allows for "Global Fits" which constrain errors significantly better.
-
-#### C. Serialization
-Experimentalists need to save analysis.
-```python
-# model.py
-def to_dict(self) -> dict: ...
-@classmethod
-def from_dict(cls, d) -> Model: ...
-
-# run.py
-def save(self, path: Path): ...
-```
-Since your `Model` is a dataclass, this is easy. Saving the `Run` is harder (numpy arrays), but pickling the `Results` dataclass is usually acceptable in Python 3.
-
-#### D. Jacobian / Hessian Support
-For non-linear least squares (`curve_fit`), passing the Jacobian (`jac=...`) speeds up fitting by 10x-100x and improves convergence.
-**Suggestion:**
-```python
-def line(x, m, b):
-    return m*x + b
-
-def line_jac(x, m, b):
-    # Returns matrix of partial derivatives
-    return np.vstack([x, np.ones_like(x)]).T
-
-model = Model.from_function(line).jac(line_jac)
-```
-
----
-
-### 4. Nitpicks & Pythonic Polish
-
-1.  **`__call__` on Model:**
-    Make the model callable.
-    ```python
-    # Instead of:
-    model.eval(x, params=...)
-    # Allow:
-    model(x, m=2, b=1)
-    ```
-    This makes it feel like a parameterized function.
-
-2.  **Data Format Inference:**
-    In `_infer_gaussian_payload`, you use `len(y) == 2` to detect `(y, sigma)`.
-    *Risk:* If I pass a list of 2 datasets `[y1, y2]` for a batch fit, this might trigger the payload detector erroneously.
-    *Fix:* Be stricter with types (require Tuples for payloads, Lists for batches) or check array dimensionality explicitly.
-
-3.  **Visualization Integration:**
-    You have `matplotlib` in `dev` dependencies, but `run.band()` returns raw data.
-    Consider a lightweight plotting accessor if `matplotlib` is installed:
-    ```python
-    # ergonomic gold standard
-    run.plot(ax=ax, show_band=True, show_seed=True)
-    ```
-
-### Summary of Roadmap Recommendations
-
-1.  **Immediate:** Add `__call__` to Model and fix the potential ambiguity in `Run` indexing.
-2.  **High Value:** Implement **Global/Shared parameters** for batch fitting. This is the killer feature for physics.
-3.  **Performance:** Vectorize the optimization loop for `scipy.minimize` batches.
-4.  **Long term:** Add `jac` support for speed and robustness.
-
-This is excellent work. The API design is clean, type-safe, and respectful of the user's time. Keep it up!
-
-
-
-This is a significant evolution. The refactoring into a **Backend Protocol** (`sensible_fitting/backends/`) is a massive architectural improvement. It separates the "what" (Model definition) from the "how" (optimization engine), making the library much more maintainable and extensible.
-
-The addition of **UltraNest** support is a standout feature. bridging the gap between "quick lab fit" and "Bayesian evidence calculation" with a unified API is a very strong value proposition for experimental physics.
-
-Here is a review of the new changes, followed by a check-in on previous suggestions and new concrete advice.
-
-### 1. The New Backend Architecture
-
-**The Good:**
-*   The `Backend` protocol in `common.py` and the registry in `__init__.py` are clean.
-*   Moving solver-specific logic (like `build_prior_transform` for UltraNest or `curve_fit` wrappers) out of the main `Model` class keeps `model.py` focused on ergonomics.
-*   The `Results.stats` dictionary is a smart way to shuttle backend-specific metadata (LogZ, convergence flags) without polluting the main `Results` dataclass.
-
-**The Risk:**
-*   **Slicing `stats` is brittle.**
-    In `Results.__getitem__` (lines 880-900), you use a heuristic to decide if a value in `stats` should be sliced:
-    ```python
-    if isinstance(v, np.ndarray) and v.shape[: len(self.batch_shape)] == self.batch_shape:
-         out[k] = v[idx]
-    ```
-    *Scenario:* You have a batch of 4 datasets. UltraNest returns a "global evidence" array that happens to have length 4 by coincidence, or a config array of length 4. Your code will slice it.
-    *Fix:* Enforce a convention. Put all per-batch statistics in a specific key (e.g., `stats['per_batch']`) or require backends to flag which keys are sliceable.
-
-### 2. Review of Previous Suggestions
-
-Here is where the code stands regarding the previous feedback:
-
-| Feature | Status | Comment |
-| :--- | :--- | :--- |
-| **`__call__` on Model** | ❌ Not Done | Still recommended. `model(x, a=1)` is nicer than `model.eval(x, params={'a':1})`. |
-| **Ambiguous Indexing** | ⚠️ Partial | `res["param"]` vs `res[0]` is distinct, but `res.params[0]` (positional) is still there. Acceptable, but requires user discipline. |
-| **Global/Shared Params** | ❌ Not Done | **Critical.** The loop `for i, ds in enumerate(datasets)` in `Model.fit` prevents multi-dataset global fits. |
-| **Vectorized `minimize`** | ❌ Not Done | Still looping in Python. Slow for large batches. |
-| **Serialization** | ❌ Not Done | No `to_dict` / `from_dict`. |
-| **Jacobian (`jac`)** | ❌ Not Done | No support for analytical derivatives yet. |
-
-### 3. New Suggestions & Code Improvements
-
-#### A. Handling Non-Gaussian Posteriors (The "Mean/Std" Trap)
-You are fitting with UltraNest (Bayesian), but `Results` is hardcoded to return `value` (mean) and `stderr` (std).
-*   **The Trap:** If a user fits a multimodal distribution (e.g., a sine wave with ambiguous phase), the mean might be in the valley between two peaks, and the std might be huge.
-*   **The Fix:**
-    1.  Keep `value`/`stderr` as convenient approximations.
-    2.  Add a warning or a flag if the posterior is non-Gaussian (UltraNest usually provides diagnostics for this).
-    3.  Expose the **Median** and **Quantile Errors** (16th/84th percentiles) in `ParamView`. These are robust for asymmetric distributions.
-
-```python
-# src/sensible_fitting/params.py
-@dataclass(frozen=True)
-class ParamView:
-    # ... existing fields ...
-    median: Optional[float] = None
-    quantiles: Optional[Tuple[float, float]] = None # (16%, 84%)
-
-# Then populate this in the UltraNest backend using np.quantile(samples, ...)
-```
-
-#### B. Implement `__call__` (Easy Win)
-This makes the model feel like a mathematical function.
-
-```python
-# src/sensible_fitting/model.py
-
-class Model:
-    # ... existing code ...
-    def __call__(self, x: Any, **kwargs) -> Any:
-        """Alias for eval, allowing model(x, a=1, b=2)."""
-        return self.eval(x, **kwargs)
-```
-
-#### C. The "Global Fit" Architecture Refactor
-To support Global Fits (linking parameters across batches) or Vectorized Minimization (speed), you need to invert control. Currently, `Model.fit` manages the loop. **The Backend should manage the loop.**
-
-**Current Flow:**
-`Model.fit` -> Loops datasets -> Calls `Backend.fit_one`
-
-**Proposed Flow:**
-`Model.fit` -> Prepares list of `Dataset` -> Calls `Backend.fit_batch(datasets)`
-
-This allows:
-1.  **ScipyCurveFitBackend:** Can loop internally (status quo) OR stack arrays for 2D `curve_fit` (fast batching).
-2.  **ScipyMinimizeBackend:** Can construct one giant loss function summing all datasets to perform a Global Fit.
-
-**Draft Implementation Plan:**
-
-1.  Change `Backend` protocol:
-    ```python
-    class Backend(Protocol):
-        def fit(self, task: FitTask) -> Results: ...
-    ```
-    Where `FitTask` contains the model, the list of datasets, and the constraints.
-
-2.  Update `Model.fit`:
-    ```python
-    # model.py
-    def fit(self, ...):
-        # 1. Prepare datasets (as you do now)
-        datasets, batch_shape = prepare_datasets(...)
-
-        # 2. Hand off EVERYTHING to the backend
-        # The backend decides if it loops or builds a giant matrix
-        return backend.fit(self, datasets, batch_shape, options)
-    ```
-
-3.  Implement Global Parameters:
-    ```python
-    # API
-    model.fit(..., shared=['frequency'])
-
-    # Backend Logic (e.g., ScipyMinimize)
-    # Total params = (N_datasets * N_local_params) + N_shared_params
-    # The objective function slices this vector and broadcasts the shared param
-    # to every dataset's eval() call.
-    ```
-
-#### D. Prior Transforms for `scipy.minimize`
-You implemented `build_prior_transform` for UltraNest. Excellent.
-However, if you are doing a standard `scipy.minimize` (Maximum Likelihood), you can use these priors as **Penalty Terms** (Regularization) in the log-likelihood.
-*   **Feature:** `model.prior(a=('normal', 0, 1))`
-*   **Result:** `fit(backend='scipy.minimize')` adds `-(a - 0)**2 / (2*1**2)` to the objective.
-This effectively gives you Maximum A Posteriori (MAP) estimation for free with standard optimizers.
-
-### 4. Code Specific Nitpicks
-
-1.  **`pyproject.toml` dependencies:**
-    You list `h5py` and `ultranest` as core dependencies. UltraNest is heavy.
-    *Suggestion:* Make them optional extras?
-    ```toml
-    [project.optional-dependencies]
-    bayes = ["ultranest", "h5py"]
-    ```
-
-2.  **`ParamsView.u` safety:**
-    In `params.py` (line 123), you check `if not np.all(np.isfinite(e))`.
-    If a fit failed for *one* batch item, `stderr` might be `NaN` or `None`.
-    *Current behavior:* Raises ValueError, blocking access to *all* uncertainties, even the good ones.
-    *Better behavior:* Return the uarray, but let `uncertainties` handle the NaN (it usually propagates it), or mask it.
-
-3.  **`models.gaussian_with_offset`:**
-    Gaussian fitting is notoriously unstable with noise.
-    *Suggestion:* Add a `weak_guess` for `y0` (offset) = `min(y)` (or median). Your guesser does this, but having a weak fallback in the parameter spec is good practice.
-
-### Summary
-The shift to `Backend` protocols is the right move. The library is shaping up to be a very clean, "Pythonic" wrapper that hides the ugly parts of `scipy` and `ultranest` without hiding the physics.
-
-**Next Priority:**
-1.  Add `__call__`.
-2.  Refactor `Model.fit` to pass the *whole batch* to the backend (instead of looping `fit_one`), which paves the way for performance optimization and global fitting.
+# sensible-fitting roadmap / improvements
+
+This file tracks planned changes and design decisions for `sensible-fitting`.
+The library is not yet used in production, so breaking changes are acceptable, but
+the goal is a stable v1 API.
+
+## Design goals
+
+- Sensible defaults for common AMO workflows (one-liners for the common case).
+- Immutable/builder-style `Model` API (no hidden mutable state).
+- Seeding is first-class and debuggable (`optimise=False`, `Run.predict(which="seed")`).
+- Consistent results/uncertainties across backends.
+- Lightweight core dependencies; heavy/optional backends behind extras.
+
+## Done
+
+- Correlated uncertainties via covariance (`ParamView.u` / `MultiParamView.u`).
+- Plotting helper (`sensible_fitting.viz.plot_fit`).
+- Core tests + example smoke tests.
+
+## Next (priority order)
+
+1. High-level plotting sugar (keep low-level helper)
+   - Add `Run.plot(...)` (or `viz.plot_run(run, ...)`) that:
+     - uses `run.data` to infer `x/y/yerr` for `data_format="normal"` when possible,
+     - refuses batched runs unless sliced (`run[i].plot(...)`),
+     - forwards styling knobs to `viz.plot_fit` for power users.
+
+2. `scipy.optimize.least_squares` backend for `data_format="normal"`
+   - Enables robust losses (`loss="soft_l1"/"huber"/"cauchy"/...`).
+   - Operates in residual space (more natural composition for global fits).
+   - Expose key SciPy knobs via `backend_options` (e.g. `loss`, `f_scale`, `jac`,
+     `diff_step`, `max_nfev`, `workers`, `bounds`).
+
+3. Jacobian support on `Model`
+   - Add `Model.jac(jac_fn)` (builder) to attach an analytic Jacobian.
+   - Use it in the `least_squares` backend (and optionally pass through to
+     `curve_fit` where supported).
+   - When no Jacobian is provided, rely on SciPy finite differences (do not make
+     autodiff a hard dependency).
+
+4. Resolve `parallel=` in `Model.fit`
+   - Either implement parallel fitting over independent datasets, or remove the
+     argument to avoid a misleading API surface.
+
+5. Dependency hygiene / packaging
+   - Fix `pyproject.toml` metadata (description).
+   - Move heavy deps behind extras (likely `ultranest` (+ `h5py`), maybe
+     `uncertainties`) and keep core minimal (`numpy`, `scipy`).
+
+6. Priors as optional MAP penalties (minimal, explicit)
+   - Keep `Model.prior(...)` for Bayesian backends.
+   - Optionally reuse priors as a penalty term for `scipy.minimize` /
+     `least_squares` (MAP) behind an explicit flag; default remains MLE.
+   - Avoid a general constraint-expression system; keep scope small.
+
+7. Bayesian reporting improvements
+   - Expose posterior summaries beyond mean/stderr (median and quantiles) for
+     `ultranest`.
+   - Make storage of large posterior objects configurable (avoid always storing
+     full samples/results for big runs).
+
+8. “Next best point” / sequential design helpers
+   - Add `Run.suggest_next_x(candidates, method="auto", objective=..., noise=...)`.
+   - Start with simple objectives (max predictive width), then add Fisher/A-opt/
+     D-opt modes when Jacobians are available.
+   - Provide a generic `design.suggest_next_x(predictor=...)` hook so Gaussian
+     processes (and other predictors) can plug in without special-casing.
+
+9. Serialization / reproducibility
+   - Add `Run.to_dict()` / `Run.from_dict()` for lightweight persistence.
+   - Optional HDF5 support can live behind an extra.
+
+10. More built-in models + seeders
+   - Expand `sensible_fitting.models` with common AMO shapes and robust guessers.
+
+## Open questions (need explicit decisions)
+
+- Do backends stay “fit one dataset” (`fit_one`) or evolve to “fit a batch”
+  (`fit_batch`) to enable global fits / better performance?
+- What is the long-term story for non-Gaussian likelihoods (binomial/beta) and
+  robust losses (residual-space vs loglike-space)?
+- Should `Run` always retain the original data payloads (current default) or
+  make this optional to reduce memory usage?
+
+## Non-goals (for now)
+
+- General expression-based constraints (e.g. `"a = 0.1*b"`) or symbolic tying.
+- Peak-list matching likelihoods (permutation-invariant feature assignment);
+  treat as an advanced add-on (fit full traces instead when possible).
