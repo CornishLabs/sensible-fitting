@@ -16,6 +16,8 @@ the goal is a stable v1 API.
 
 - Correlated uncertainties via covariance (`ParamView.u` / `MultiParamView.u`).
 - Plotting helper (`sensible_fitting.viz.plot_fit`).
+- FitData helpers for sequential design (`FitData.append(...)`, `FitData.sorted()`).
+- “Next best point” helper (`Run.suggest_next_x`) using posterior/covariance.
 - Core tests + example smoke tests.
 
 ## Next (priority order)
@@ -60,18 +62,11 @@ the goal is a stable v1 API.
    - Make storage of large posterior objects configurable (avoid always storing
      full samples/results for big runs).
 
-8. “Next best point” / sequential design helpers
-   - Add `Run.suggest_next_x(candidates, method="auto", objective=..., noise=...)`.
-   - Start with simple objectives (max predictive width), then add Fisher/A-opt/
-     D-opt modes when Jacobians are available.
-   - Provide a generic `design.suggest_next_x(predictor=...)` hook so Gaussian
-     processes (and other predictors) can plug in without special-casing.
-
-9. Serialization / reproducibility
+8. Serialization / reproducibility
    - Add `Run.to_dict()` / `Run.from_dict()` for lightweight persistence.
    - Optional HDF5 support can live behind an extra.
 
-10. More built-in models + seeders
+9. More built-in models + seeders
    - Expand `sensible_fitting.models` with common AMO shapes and robust guessers.
 
 ## Open questions (need explicit decisions)
