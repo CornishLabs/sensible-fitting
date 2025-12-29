@@ -24,7 +24,7 @@ def main() -> None:
         models.sinusoid(name="wave")
         .fix(offset=0.0, phase=0.0)
         .bound(amplitude=(1.0, 3.0), frequency=(0.5, 6.0))
-        .guess(frequency=2.8)
+        .weak_guess(frequency=2.8)
     )
 
     # Straight line model: f(i) = a + b * i
@@ -72,32 +72,27 @@ def main() -> None:
             y_label="signal",
             label="data",
         )
-        # curve_fit struggles with sinusoid local minima unless seeded very well;
-        # differential evolution is a robust global optimiser for this.
+        # "auto" tries curve_fit first, then falls back to a global optimiser if needed.
         run_sin = sin_model.fit(
             sin_data,
-            backend="scipy.differential_evolution",
-            backend_options={
-                "maxiter": 20,
-                "popsize": 8,
-                "seed": 0,
-            },
+            backend="auto",
+            backend_options={"maxiter": 20, "popsize": 8, "seed": 0},
         )
         res_sin = run_sin.results
 
         freqs = res_sin["frequency"].value
         freq_err = res_sin["frequency"].stderr
 
-        # Second-level fit: line through frequencies vs. index
-        line_data = FitData.normal(
-            x=idx,
-            y=freqs,
-            yerr=freq_err,
-            x_label="system index i",
-            y_label="frequency",
-            label="batch-fit frequency ± 1σ",
-        )
-        run_line = line_model.fit(line_data).squeeze()
+        # Second-level fit: line through frequencies vs. index (fits-of-fits helper)
+        # (You can also do: line_model.fit(idx, res_sin["frequency"]).)
+        run_line = line_model.fit(
+            res_sin["frequency"].as_fitdata(
+                x=idx,
+                x_label="system index i",
+                y_label="frequency",
+                label="batch-fit frequency ± 1σ",
+            )
+        ).squeeze()
         res_line = run_line.results
 
         a_hat = res_line["a"].value
@@ -123,26 +118,11 @@ def main() -> None:
 
     # --- Lower-level checks: first-level time-domain fits --------------------
     if example_run_sin is not None and example_freq_true is not None:
-        def _as_float_array(v):
-            if v is None:
-                return None
-            a = np.asarray(v, dtype=object)
-            flat = [np.nan if vv is None else float(vv) for vv in a.ravel().tolist()]
-            return np.asarray(flat, dtype=float).reshape(a.shape)
-
         xg = np.linspace(float(x.min()), float(x.max()), 800)
         fig, axs = plt.subplots(2, 3, figsize=(12, 6), sharex=True, sharey=True, constrained_layout=True)
-        example_run_sin.plot(
-            axs=axs,
-            xg=xg,
-            errorbars=False,
-            band=True,
-            data_kwargs={"marker": ".", "ms": 2, "alpha": 0.7},
-            title_names=["frequency", "amplitude"],
-        )
-        flat = np.asarray(axs, dtype=object).ravel()
-        for i in range(N_SYSTEMS):
-            ax = flat[i]
+
+        def _overlay_true(ax, subrun, idx):
+            i = int(idx[0])
             ax.plot(
                 xg,
                 sin_model.eval(xg, amplitude=1.5, frequency=float(example_freq_true[i])),
@@ -150,18 +130,26 @@ def main() -> None:
                 lw=1,
                 label="true",
             )
-            ax.set_title(f"system {i}\n" + ax.get_title())
             ax.legend()
-        # Hide unused last panel (2x3 grid for 5 systems)
-        flat[-1].set_visible(False)
+
+        example_run_sin.plot(
+            axs=axs,
+            xg=xg,
+            errorbars=False,
+            band=True,
+            data_kwargs={"marker": ".", "ms": 2, "alpha": 0.7},
+            title_names=["frequency", "amplitude"],
+            panel_title="system {i}",
+            each=_overlay_true,
+        )
 
         # First-level extracted parameters vs system index (frequency & amplitude)
         fig, (axf, axa) = plt.subplots(1, 2, figsize=(10, 4), constrained_layout=True)
         res = example_run_sin.results
         freq_hat = np.asarray(res["frequency"].value, dtype=float)
-        freq_err = _as_float_array(res["frequency"].stderr)
+        freq_err = None if res["frequency"].stderr is None else np.asarray(res["frequency"].stderr, dtype=float)
         amp_hat = np.asarray(res["amplitude"].value, dtype=float)
-        amp_err = _as_float_array(res["amplitude"].stderr)
+        amp_err = None if res["amplitude"].stderr is None else np.asarray(res["amplitude"].stderr, dtype=float)
 
         axf.errorbar(idx, freq_hat, yerr=freq_err, fmt="o", capsize=2, label="fit")
         axf.plot(idx, example_freq_true, "k--", lw=1, label="true")

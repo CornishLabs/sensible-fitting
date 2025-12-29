@@ -249,12 +249,7 @@ class Model:
         x: Any,
         data: Any = None,
         *,
-        backend: Literal[
-            "scipy.curve_fit",
-            "scipy.differential_evolution",
-            "scipy.minimize",
-            "ultranest",
-        ] = "scipy.curve_fit",
+        backend: str | Sequence[str] = "scipy.curve_fit",
         data_format: Optional[str] = None,
         parallel: Optional[Literal[None, "auto"]] = None,
         seed_override: Optional[Mapping[str, float]] = None,
@@ -275,7 +270,11 @@ class Model:
         - scipy.minimize supports cov_method="auto" (use hess_inv if available, else numdiff)
         - cov_method="numdiff" is more robust for non-Gaussian likelihoods
         - scipy.differential_evolution is a global optimiser (requires finite bounds)
+        - backend="auto" tries a fast local solver first, then falls back to a global solver
+        - backend=("a", "b", ...) runs a backend pipeline, passing results forward as seeds
         """
+        from .params import ParamView
+
         meta: Optional[Dict[str, Any]] = None
         if isinstance(x, FitData):
             if data is not None:
@@ -297,6 +296,26 @@ class Model:
                 meta["y_label"] = fd.y_label
             if fd.label is not None:
                 meta["label"] = fd.label
+        elif isinstance(data, ParamView):
+            # Convenience: allow fits-of-fits without manually repackaging
+            # ParamView(value, stderr) into (y, sigma).
+            if data_format is None:
+                data_format = "normal"
+            elif data_format != "normal":
+                raise ValueError("ParamView payloads are only supported for data_format='normal'.")
+            yerr = data.stderr
+            if yerr is not None:
+                try:
+                    e = np.asarray(yerr, dtype=object)
+                    if e.dtype == object and any(v is None for v in e.ravel().tolist()):
+                        yerr = None
+                    else:
+                        ef = np.asarray(yerr, dtype=float)
+                        if not np.all(np.isfinite(ef)):
+                            yerr = None
+                except Exception:
+                    yerr = None
+            data = data.value if yerr is None else (data.value, yerr)
         elif data is None:
             raise TypeError("fit() missing required argument: data")
 
@@ -307,25 +326,70 @@ class Model:
         if data_format is None:
             data_format = "normal"
 
+        # ---- backend normalization -----------------------------------------
+        backend_mode = "single"
+        backend_steps: list[str] = []
+
+        if isinstance(backend, str):
+            backend_name = backend
+            if backend_name == "auto":
+                backend_mode = "auto"
+            else:
+                backend_steps = [backend_name]
+        elif isinstance(backend, (tuple, list)):
+            backend_mode = "pipeline"
+            backend_steps = [str(b) for b in backend]
+            if not backend_steps:
+                raise ValueError("backend pipeline cannot be empty.")
+        else:
+            raise TypeError("backend must be a string or a sequence of strings.")
+
         # Automatic backend switching for non-Gaussian (old default behaviour).
-        if data_format in ("binomial", "beta") and backend == "scipy.curve_fit":
-            backend = "scipy.minimize"
+        if backend_mode == "single" and data_format in ("binomial", "beta") and backend_steps == ["scipy.curve_fit"]:
+            backend_steps = ["scipy.minimize"]
 
         # Enforce current capability boundaries clearly.
-        if data_format == "binomial" and backend not in ("scipy.minimize", "ultranest"):
-            raise NotImplementedError(
-                "v1: binomial data currently requires backend='scipy.minimize' or 'ultranest'."
-            )
-        if data_format == "beta" and backend != "scipy.minimize":
-            raise NotImplementedError(
-                "v1: beta data currently requires backend='scipy.minimize'."
-            )
+        allowed_normal = {"scipy.curve_fit", "scipy.differential_evolution", "ultranest"}
+        allowed_binomial = {"scipy.minimize", "ultranest"}
+        allowed_beta = {"scipy.minimize"}
+
+        if backend_mode == "auto":
+            if data_format == "beta":
+                backend_steps = ["scipy.minimize"]
+                backend_mode = "single"
+            elif data_format == "binomial":
+                backend_steps = ["scipy.minimize"]
+                backend_mode = "single"
+            else:  # normal
+                # Auto mode is handled per-dataset below.
+                backend_steps = []
+
+        if data_format == "normal":
+            if backend_steps and any(b not in allowed_normal for b in backend_steps):
+                raise NotImplementedError(
+                    "v1: normal data currently supports backend in "
+                    f"{tuple(sorted(allowed_normal))}."
+                )
+        elif data_format == "binomial":
+            if backend_steps and any(b not in allowed_binomial for b in backend_steps):
+                raise NotImplementedError(
+                    "v1: binomial data currently requires backend in "
+                    f"{tuple(sorted(allowed_binomial))}."
+                )
+        elif data_format == "beta":
+            if backend_steps and any(b not in allowed_beta for b in backend_steps):
+                raise NotImplementedError(
+                    "v1: beta data currently requires backend in "
+                    f"{tuple(sorted(allowed_beta))}."
+                )
+        else:
+            raise NotImplementedError(f"Unknown data_format {data_format!r}.")
 
         datasets, batch_shape = prepare_datasets(x, data, data_format, strict)
 
         free_names, fixed_map = _free_and_fixed(self.params)
-
-        backend_impl = get_backend(backend)
+        # used for Results/Run labels; may differ from the user's backend spec.
+        backend_label = backend if isinstance(backend, str) else "pipeline"
 
         # Allocate storage in flattened-batch form
         B = len(datasets)
@@ -371,7 +435,7 @@ class Model:
                 covs[i] = None
                 continue
 
-            r = backend_impl.fit_one(
+            r_use, used_backend_name = _run_backend_plan(
                 model=self,
                 dataset=ds,
                 free_names=free_names,
@@ -379,24 +443,30 @@ class Model:
                 p0=p0,
                 bounds=bounds,
                 options=backend_options,
+                mode=backend_mode,
+                steps=backend_steps,
+                data_format=data_format,
             )
 
-            successes[i] = bool(r.success)
-            messages[i] = str(r.message)
-            stats_list[i] = dict(r.stats or {})
+            successes[i] = bool(r_use.success)
+            messages[i] = str(r_use.message)
+            stats_list[i] = dict(r_use.stats or {})
 
-            theta = np.asarray(r.theta, dtype=float)
+            theta = np.asarray(r_use.theta, dtype=float)
             for j, n in enumerate(free_names):
                 values[n][i] = float(theta[j])
             for n, fv in fixed_map.items():
                 values[n][i] = float(fv)
 
-            covs[i] = r.cov
-            if r.cov is not None:
-                pcov = np.asarray(r.cov, dtype=float)
+            covs[i] = r_use.cov
+            if r_use.cov is not None:
+                pcov = np.asarray(r_use.cov, dtype=float)
                 perr = np.sqrt(np.clip(np.diag(pcov), 0.0, np.inf))
                 for j, n in enumerate(free_names):
                     errors[n][i] = float(perr[j])
+            # Keep a useful backend label per-dataset (best backend in a pipeline).
+            if isinstance(stats_list[i], dict):
+                stats_list[i].setdefault("backend", used_backend_name)
 
         # Build param views + cov
         if batch_shape == ():
@@ -442,7 +512,9 @@ class Model:
                 params=ParamsView(items, _context=ctx),
                 seed=ParamsView(seed_items),
                 cov=cov,
-                backend=backend,
+                backend=str(stats_list[0].get("backend", backend_label))
+                if isinstance(stats_list[0], dict)
+                else str(backend_label),
                 stats=(dict(stats_list[0]) if stats_list[0] is not None else {}),
             )
         else:
@@ -460,7 +532,8 @@ class Model:
             for n in self.param_names:
                 spec = _spec_by_name(self.params, n)
                 v = unflatten_batch(values[n], batch_shape)
-                e = unflatten_batch(np.asarray(errors[n], dtype=object), batch_shape)
+                e_obj = unflatten_batch(np.asarray(errors[n], dtype=object), batch_shape)
+                e = _maybe_float_stderr(e_obj)
                 sv = unflatten_batch(seed_values[n], batch_shape)
                 stderr_val = None if spec.fixed else e
                 values_map[n] = v
@@ -485,12 +558,20 @@ class Model:
             stats: Dict[str, Any] = {
                 "per_batch": unflatten_batch(np.asarray(stats_list, dtype=object), batch_shape)
             }
+            backends = []
+            for s in np.asarray(stats_list, dtype=object).ravel().tolist():
+                if isinstance(s, dict) and isinstance(s.get("backend"), str):
+                    backends.append(str(s["backend"]))
+            backend_used = str(backend_label)
+            if backends:
+                uniq = sorted(set(backends))
+                backend_used = uniq[0] if len(uniq) == 1 else "mixed"
             results = Results(
                 batch_shape=batch_shape,
                 params=ParamsView(items, _context=ctx),
                 seed=ParamsView(seed_items),
                 cov=cov_obj,  # object array, per-batch cov matrices (or None)
-                backend=backend,
+                backend=backend_used,
                 stats=stats,
             )
 
@@ -633,7 +714,7 @@ class Model:
         run = Run(
             model=self,
             results=results,
-            backend=backend,
+            backend=str(getattr(results, "backend", backend_label)),
             data_format=data_format,
             data=(
                 {"x": x, "data": data}
@@ -695,6 +776,218 @@ def _bounds_for_free(
             lo.append(-np.inf if b[0] is None else float(b[0]))
             hi.append(np.inf if b[1] is None else float(b[1]))
     return (np.array(lo, dtype=float), np.array(hi, dtype=float))
+
+
+def _all_finite_bounds(bounds: Tuple[np.ndarray, np.ndarray]) -> bool:
+    """Return True if every parameter has finite (lo, hi) bounds."""
+    lo, hi = bounds
+    lo = np.asarray(lo, dtype=float)
+    hi = np.asarray(hi, dtype=float)
+    return bool(np.all(np.isfinite(lo)) and np.all(np.isfinite(hi)) and np.all(hi > lo))
+
+
+def _maybe_float_stderr(stderr: Any) -> Any:
+    """Cast object stderr arrays to float when fully-populated.
+
+    v1 stores batched stderrs as dtype=object so we can represent per-batch missing
+    entries as None. When all entries are present, returning a float array is more
+    ergonomic (plots, downstream fits-of-fits, etc).
+    """
+    if not isinstance(stderr, np.ndarray) or stderr.dtype != object:
+        return stderr
+    flat = stderr.ravel().tolist()
+    if any(v is None for v in flat):
+        return stderr
+    try:
+        out = stderr.astype(float)
+    except Exception:
+        return stderr
+    return out
+
+
+def _run_backend_plan(
+    *,
+    model: Any,
+    dataset: Any,
+    free_names: List[str],
+    fixed_map: Dict[str, float],
+    p0: np.ndarray,
+    bounds: Tuple[np.ndarray, np.ndarray],
+    options: Dict[str, Any],
+    mode: str,
+    steps: Sequence[str],
+    data_format: str,
+) -> Tuple[Any, str]:
+    """Run a single backend, a backend pipeline, or auto fallback for one dataset."""
+    from .backends.common import BackendResult
+
+    def _record(backend_name: str, r: BackendResult) -> Dict[str, Any]:
+        return {
+            "backend": backend_name,
+            "success": bool(r.success),
+            "message": str(r.message),
+            "stats": dict(r.stats or {}),
+        }
+
+    if mode == "single":
+        if len(steps) != 1:
+            raise ValueError("single backend mode requires exactly one step.")
+        name = str(steps[0])
+        r = get_backend(name).fit_one(
+            model=model,
+            dataset=dataset,
+            free_names=free_names,
+            fixed_map=fixed_map,
+            p0=p0,
+            bounds=bounds,
+            options=options,
+        )
+        stats = dict(r.stats or {})
+        stats["backend"] = name
+        return BackendResult(
+            theta=np.asarray(r.theta, dtype=float),
+            cov=r.cov,
+            success=bool(r.success),
+            message=str(r.message),
+            stats=stats,
+        ), name
+
+    if mode == "pipeline":
+        if not steps:
+            raise ValueError("pipeline backend mode requires at least one step.")
+
+        pipeline: list[Dict[str, Any]] = []
+        best: Optional[BackendResult] = None
+        best_name: str = str(steps[0])
+        current_p0 = np.asarray(p0, dtype=float)
+        last: Optional[BackendResult] = None
+        last_name: str = best_name
+
+        for name in steps:
+            name = str(name)
+            last_name = name
+            r = get_backend(name).fit_one(
+                model=model,
+                dataset=dataset,
+                free_names=free_names,
+                fixed_map=fixed_map,
+                p0=current_p0,
+                bounds=bounds,
+                options=options,
+            )
+            last = r
+            pipeline.append(_record(name, r))
+            if bool(r.success):
+                best = r
+                best_name = name
+            try:
+                theta = np.asarray(r.theta, dtype=float)
+                if theta.shape == current_p0.shape and np.all(np.isfinite(theta)):
+                    current_p0 = theta
+            except Exception:
+                pass
+
+        use = best if best is not None else last
+        use_name = best_name if best is not None else last_name
+        if use is None:
+            raise RuntimeError("pipeline produced no result (this should be impossible).")
+
+        stats = dict(use.stats or {})
+        stats["backend"] = use_name
+        stats["pipeline_mode"] = "pipeline"
+        stats["pipeline_best_backend"] = use_name
+        stats["pipeline"] = pipeline
+
+        return BackendResult(
+            theta=np.asarray(use.theta, dtype=float),
+            cov=use.cov,
+            success=bool(use.success),
+            message=str(use.message),
+            stats=stats,
+        ), use_name
+
+    if mode != "auto":
+        raise ValueError(f"Unknown backend mode: {mode!r}")
+
+    # ---- auto fallback ------------------------------------------------------
+    if data_format != "normal":
+        raise ValueError("auto backend mode is only valid for data_format='normal'.")
+
+    pipeline = []
+    best: Optional[BackendResult] = None
+    best_name: str = "scipy.curve_fit"
+    last: BackendResult
+    last_name: str = "scipy.curve_fit"
+
+    # Try fast local least squares first.
+    r_cf = get_backend("scipy.curve_fit").fit_one(
+        model=model,
+        dataset=dataset,
+        free_names=free_names,
+        fixed_map=fixed_map,
+        p0=p0,
+        bounds=bounds,
+        options=options,
+    )
+    pipeline.append(_record("scipy.curve_fit", r_cf))
+    last = r_cf
+    if bool(r_cf.success):
+        best = r_cf
+        best_name = "scipy.curve_fit"
+
+    # If that fails and bounds are finite, fall back to DE and (optionally) re-run curve_fit.
+    if best is None and _all_finite_bounds(bounds):
+        r_de = get_backend("scipy.differential_evolution").fit_one(
+            model=model,
+            dataset=dataset,
+            free_names=free_names,
+            fixed_map=fixed_map,
+            p0=p0,
+            bounds=bounds,
+            options=options,
+        )
+        pipeline.append(_record("scipy.differential_evolution", r_de))
+        last = r_de
+        last_name = "scipy.differential_evolution"
+        # Treat DE as the best available fallback even if it hits maxiter.
+        best = r_de
+        best_name = "scipy.differential_evolution"
+
+        # Refine with curve_fit from the DE result (often improves covariance).
+        try:
+            p0_refine = np.asarray(r_de.theta, dtype=float)
+        except Exception:
+            p0_refine = np.asarray(p0, dtype=float)
+        r_cf2 = get_backend("scipy.curve_fit").fit_one(
+            model=model,
+            dataset=dataset,
+            free_names=free_names,
+            fixed_map=fixed_map,
+            p0=p0_refine,
+            bounds=bounds,
+            options=options,
+        )
+        pipeline.append(_record("scipy.curve_fit", r_cf2))
+        last = r_cf2
+        last_name = "scipy.curve_fit"
+        if bool(r_cf2.success):
+            best = r_cf2
+            best_name = "scipy.curve_fit"
+
+    use = best if best is not None else last
+    stats = dict(use.stats or {})
+    stats["backend"] = best_name if best is not None else last_name
+    stats["pipeline_mode"] = "auto"
+    stats["pipeline_best_backend"] = stats["backend"]
+    stats["pipeline"] = pipeline
+
+    return BackendResult(
+        theta=np.asarray(use.theta, dtype=float),
+        cov=use.cov,
+        success=bool(use.success),
+        message=str(use.message),
+        stats=stats,
+    ), str(stats["backend"])
 
 
 def _default_seed_engine(

@@ -261,6 +261,27 @@ class ParamView:
             return self.derived
         raise KeyError(key)
 
+    def as_fitdata(
+        self,
+        *,
+        x: Any,
+        x_label: Optional[str] = None,
+        y_label: Optional[str] = None,
+        label: Optional[str] = None,
+        meta: Optional[Mapping[str, Any]] = None,
+    ):
+        """Build a FitData view for fits-of-fits."""
+        from .inputs import FitData
+
+        return FitData.from_param(
+            x=x,
+            param=self,
+            x_label=x_label,
+            y_label=y_label,
+            label=label,
+            meta=meta,
+        )
+
 
 @dataclass(frozen=True)
 class MultiParamView:

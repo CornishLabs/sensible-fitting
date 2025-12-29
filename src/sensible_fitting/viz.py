@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Mapping, Optional, Sequence, Tuple, Literal
+from typing import Any, Callable, Mapping, Optional, Sequence, Tuple, Literal
 from warnings import warn
 
 import numpy as np
@@ -76,8 +76,10 @@ def plot_fit(
     data: bool = True,
     line: bool = True,
     band: bool = False,
+    posterior_lines: bool | int = False,
     band_options: Optional[Mapping[str, Any]] = None,
     band_kwargs: Optional[Mapping[str, Any]] = None,
+    posterior_lines_kwargs: Optional[Mapping[str, Any]] = None,
     data_kwargs: Optional[Mapping[str, Any]] = None,
     line_kwargs: Optional[Mapping[str, Any]] = None,
     show_params: bool = False,
@@ -107,10 +109,14 @@ def plot_fit(
         If True, draw the fit/seed line using run.predict(...).
     band : bool
         If True, draw uncertainty band using run.band().
+    posterior_lines : bool | int
+        If True (or an integer N), and posterior samples are present on the Run,
+        draw N semi-transparent posterior sample lines.
     band_options : dict, optional
         Keyword options forwarded to run.band().
-    band_kwargs, data_kwargs, line_kwargs, text_kwargs : dict, optional
-        Styling kwargs for fill_between, errorbar, plot, and text.
+    band_kwargs, posterior_lines_kwargs, data_kwargs, line_kwargs, text_kwargs : dict, optional
+        Styling kwargs for fill_between, posterior sample plot lines, errorbar,
+        plot, and text.
     show_params : bool
         If True, annotate fitted parameters on the plot.
     param_names : sequence of str, optional
@@ -129,6 +135,7 @@ def plot_fit(
     line_kwargs = dict(line_kwargs or {})
     band_options = dict(band_options or {})
     band_kwargs = dict(band_kwargs or {})
+    posterior_lines_kwargs = dict(posterior_lines_kwargs or {})
     text_kwargs = dict(text_kwargs or {})
 
     x_arr = np.asarray(x)
@@ -157,12 +164,25 @@ def plot_fit(
             ax.errorbar(x_arr, y_arr, yerr=yerr, **data_kwargs)
 
     if run is not None:
-        if xg is None:
+        n_posterior_lines = 0
+        if isinstance(posterior_lines, bool):
+            n_posterior_lines = 30 if posterior_lines else 0
+        else:
+            try:
+                n_posterior_lines = int(posterior_lines)
+            except Exception:
+                n_posterior_lines = 0
+        n_posterior_lines = max(0, n_posterior_lines)
+
+        if xg is None and (line or band or n_posterior_lines > 0):
             xg = np.linspace(float(np.min(x_arr)), float(np.max(x_arr)), 400)
+
+        line_artist = None
         if line:
             yfit = run.predict(xg, which=which)
             line_kwargs.setdefault("label", "fit" if which == "fit" else "seed")
-            ax.plot(xg, yfit, **line_kwargs)
+            line_kwargs.setdefault("zorder", 3)
+            (line_artist,) = ax.plot(xg, yfit, **line_kwargs)
 
         if band:
             try:
@@ -171,7 +191,59 @@ def plot_fit(
                 warn(f"plot_fit: could not compute band: {exc}", UserWarning)
             else:
                 band_kwargs.setdefault("alpha", 0.2)
+                band_kwargs.setdefault("zorder", 1)
+                if line_artist is not None:
+                    band_kwargs.setdefault("color", line_artist.get_color())
                 ax.fill_between(xg, band_obj.low, band_obj.high, **band_kwargs)
+
+        if n_posterior_lines > 0:
+            res = getattr(run, "results", None)
+            stats = getattr(res, "stats", {}) or {}
+            samples = stats.get("posterior_samples", None)
+            if isinstance(samples, np.ndarray) and samples.size and samples.ndim == 2:
+                free_names = list(stats.get("free_names", ()))
+                if not free_names:
+                    try:
+                        free_names = [
+                            p.name
+                            for p in getattr(getattr(run, "model", None), "params")
+                            if not getattr(p, "fixed", False)
+                        ]
+                    except Exception:
+                        free_names = []
+
+                if free_names and samples.shape[1] == len(free_names):
+                    S = int(samples.shape[0])
+                    take = min(int(n_posterior_lines), S)
+                    if take > 0:
+                        if take < S:
+                            idx = np.linspace(0, S - 1, take, dtype=int)
+                        else:
+                            idx = np.arange(S, dtype=int)
+
+                        if line_artist is not None:
+                            base_color = line_artist.get_color()
+                        else:
+                            base_color = (
+                                posterior_lines_kwargs.get("color")
+                                or line_kwargs.get("color")
+                                or band_kwargs.get("color")
+                                or "C0"
+                            )
+
+                        posterior_lines_kwargs.setdefault("color", base_color)
+                        posterior_lines_kwargs.setdefault("alpha", 0.05)
+                        posterior_lines_kwargs.setdefault("lw", 1.0)
+                        posterior_lines_kwargs.setdefault("label", "_nolegend_")
+                        posterior_lines_kwargs.setdefault("zorder", 2)
+
+                        for ii in idx.tolist():
+                            p = {
+                                name: float(samples[int(ii), j])
+                                for j, name in enumerate(free_names)
+                            }
+                            y_s = run.predict(xg, params=p)
+                            ax.plot(xg, y_s, **posterior_lines_kwargs)
 
         if show_params:
             params = run.results.params
@@ -218,6 +290,8 @@ def plot_run(
     errorbars: bool | Literal["auto"] = "auto",
     line: bool = True,
     band: bool | Literal["auto"] = "auto",
+    posterior_lines: bool | int = False,
+    posterior_lines_kwargs: Optional[Mapping[str, Any]] = None,
     which: Literal["auto", "fit", "seed"] = "auto",
     xg: Optional[np.ndarray] = None,
     band_options: Optional[Mapping[str, Any]] = None,
@@ -231,6 +305,8 @@ def plot_run(
     x_label: Optional[str] = None,
     y_label: Optional[str] = None,
     hide_unused: bool = True,
+    panel_title: Optional[str] = None,
+    each: Optional[Callable[[Any, Any, Tuple[int, ...]], None]] = None,
 ) -> Tuple[Any, Any]:
     """High-level plotting helper for a Run.
 
@@ -238,10 +314,18 @@ def plot_run(
     - plots data points (with error bars if available),
     - plots the fitted curve (or seed curve if optimise=False),
     - plots an uncertainty band when available,
+    - optionally overlays semi-transparent posterior sample curves,
     - sets the Axes title to a compact parameter summary.
 
     For batched runs, pass `axs` (an array-like of Matplotlib axes) to plot each
     batch element into its own subplot.
+
+    panel_title:
+      For batched runs, prefix each subplot title with a formatted string.
+      Format fields: {i}, {idx}, and {idx0}, {idx1}, ...
+
+    each:
+      For batched runs, call `each(ax, subrun, idx)` after drawing each subplot.
     """
     if axs is not None and ax is not None:
         raise ValueError("Provide only one of ax= or axs=.")
@@ -266,16 +350,42 @@ def plot_run(
                 f"axs has size {axs_arr.size} but run has batch_size {batch_size}."
             )
 
+        def _panel_prefix(*, i: int, idx: Tuple[int, ...]) -> Optional[str]:
+            if panel_title is None:
+                return None
+            data = {"i": int(i), "idx": tuple(int(v) for v in idx)}
+            for j, v in enumerate(idx):
+                data[f"idx{j}"] = int(v)
+            try:
+                return str(panel_title).format(**data)
+            except Exception:
+                return str(panel_title)
+
+        def _apply_panel_title(ax_i: Any, prefix: str) -> None:
+            current = ""
+            try:
+                current = str(ax_i.get_title() or "")
+            except Exception:
+                current = ""
+            if current:
+                ax_i.set_title(prefix + "\n" + current)
+            else:
+                ax_i.set_title(prefix)
+
         # If axs has matching shape, index it with the same batch indices.
         if axs_arr.shape == batch_shape:
-            for idx in np.ndindex(batch_shape):
+            for i, idx in enumerate(np.ndindex(batch_shape)):
+                subrun = run[idx]
+                ax_i = axs_arr[idx]
                 plot_run(
-                    run=run[idx],
-                    ax=axs_arr[idx],
+                    run=subrun,
+                    ax=ax_i,
                     data=data,
                     errorbars=errorbars,
                     line=line,
                     band=band,
+                    posterior_lines=posterior_lines,
+                    posterior_lines_kwargs=posterior_lines_kwargs,
                     which=which,
                     xg=xg,
                     band_options=band_options,
@@ -289,33 +399,51 @@ def plot_run(
                     x_label=x_label,
                     y_label=y_label,
                     hide_unused=hide_unused,
+                    panel_title=None,
+                    each=None,
                 )
+                prefix = _panel_prefix(i=i, idx=idx)
+                if prefix:
+                    _apply_panel_title(ax_i, prefix)
+                if each is not None:
+                    each(ax_i, subrun, idx)
             return axs_arr.ravel()[0].figure, axs
 
         # Otherwise plot in flattened order.
         flat = axs_arr.ravel()
         for i, idx in enumerate(np.ndindex(batch_shape)):
-                plot_run(
-                    run=run[idx],
-                    ax=flat[i],
-                    data=data,
-                    errorbars=errorbars,
-                    line=line,
-                    band=band,
-                    which=which,
-                    xg=xg,
-                    band_options=band_options,
-                    band_kwargs=band_kwargs,
-                    data_kwargs=data_kwargs,
-                    line_kwargs=line_kwargs,
-                    title=title,
-                    title_names=title_names,
-                    title_digits=title_digits,
-                    title_kwargs=title_kwargs,
-                    x_label=x_label,
-                    y_label=y_label,
-                    hide_unused=hide_unused,
-                )
+            subrun = run[idx]
+            ax_i = flat[i]
+            plot_run(
+                run=subrun,
+                ax=ax_i,
+                data=data,
+                errorbars=errorbars,
+                line=line,
+                band=band,
+                posterior_lines=posterior_lines,
+                posterior_lines_kwargs=posterior_lines_kwargs,
+                which=which,
+                xg=xg,
+                band_options=band_options,
+                band_kwargs=band_kwargs,
+                data_kwargs=data_kwargs,
+                line_kwargs=line_kwargs,
+                title=title,
+                title_names=title_names,
+                title_digits=title_digits,
+                title_kwargs=title_kwargs,
+                x_label=x_label,
+                y_label=y_label,
+                hide_unused=hide_unused,
+                panel_title=None,
+                each=None,
+            )
+            prefix = _panel_prefix(i=i, idx=idx)
+            if prefix:
+                _apply_panel_title(ax_i, prefix)
+            if each is not None:
+                each(ax_i, subrun, idx)
 
         if hide_unused:
             for j in range(batch_size, flat.size):
@@ -364,14 +492,16 @@ def plot_run(
         x=x,
         y=y,
         yerr=yerr_use,
-        run=(run if (line or band_use) else None),
+        run=(run if (line or band_use or bool(posterior_lines)) else None),
         which=which_use,
         xg=xg,
         data=data,
         line=line,
         band=band_use,
+        posterior_lines=posterior_lines,
         band_options=band_options,
         band_kwargs=band_kwargs,
+        posterior_lines_kwargs=posterior_lines_kwargs,
         data_kwargs=data_kwargs,
         line_kwargs=line_kwargs,
         show_params=False,

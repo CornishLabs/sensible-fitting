@@ -91,6 +91,36 @@ class FitData:
             meta=dict(meta or {}),
         )
 
+    @staticmethod
+    def from_param(
+        *,
+        x: Any,
+        param: Any,
+        x_label: Optional[str] = None,
+        y_label: Optional[str] = None,
+        label: Optional[str] = None,
+        meta: Optional[Mapping[str, Any]] = None,
+    ) -> "FitData":
+        """Create FitData for data_format='normal' from a ParamView-like object."""
+        name = getattr(param, "name", None)
+        y = getattr(param, "value", None)
+        yerr = getattr(param, "stderr", None)
+        if y is None:
+            raise TypeError("param must provide .value")
+        if y_label is None and isinstance(name, str) and name:
+            y_label = name
+        if label is None and isinstance(name, str) and name:
+            label = name
+        return FitData.normal(
+            x=x,
+            y=y,
+            yerr=yerr,
+            x_label=x_label,
+            y_label=y_label,
+            label=label,
+            meta=meta,
+        )
+
     def with_labels(
         self,
         *,
@@ -117,4 +147,3 @@ class FitData:
         from .viz import plot_data
 
         return plot_data(self, *args, **kwargs)
-
