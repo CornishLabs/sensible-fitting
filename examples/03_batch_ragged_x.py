@@ -1,5 +1,7 @@
 import numpy as np
-from sensible_fitting import models
+import matplotlib.pyplot as plt
+
+from sensible_fitting import FitData, models
 
 model = models.straight_line().guess(m=0.0, b=0.0)
 
@@ -15,5 +17,21 @@ for i in range(3):
     xs.append(x)
     ys.append((y, sigma))
 
-run = model.fit(xs, ys)
+data = FitData(
+    x=xs,
+    data=ys,  # ragged batch payload: [(y0, sigma0), (y1, sigma1), ...]
+    data_format="normal",
+    x_label="x",
+    y_label="y",
+    label="data",
+)
+run = model.fit(data)
 print(run.results.summary(digits=4))
+
+fig, axs = plt.subplots(1, len(xs), figsize=(12, 3.5), sharey=True, constrained_layout=True)
+run.plot(axs=axs)
+for i, ax in enumerate(np.asarray(axs, dtype=object).ravel()):
+    title = ax.get_title()
+    ax.set_title(f"dataset {i}\n{title}" if title else f"dataset {i}")
+    ax.legend()
+plt.show()

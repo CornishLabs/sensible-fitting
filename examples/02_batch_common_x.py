@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from sensible_fitting import models
+from sensible_fitting import FitData, models
 
 model = (
     models.sinusoid(name="wave")
@@ -23,22 +23,25 @@ y_clean = np.stack(
 )
 y = y_clean + rng.normal(0, sigma, size=y_clean.shape)
 
-run = model.fit(x, (y, sigma))
+data = FitData.normal(
+    x=x,
+    y=y,
+    yerr=sigma,
+    x_label="time",
+    y_label="signal",
+    label="data",
+)
+run = model.fit(data)
 res = run.results
 print(res.summary(digits=4))
 
-fig, axs = plt.subplots(2, 2, figsize=(10, 7), sharex=True, sharey=True)
-axs = axs.ravel()
-xg = np.linspace(x.min(), x.max(), 500)
+fig, axs = plt.subplots(2, 2, figsize=(10, 7), sharex=True, sharey=True, constrained_layout=True)
+run.plot(axs=axs)
 
-for i, ax in enumerate(axs):
-    ax.errorbar(x, y[i], yerr=sigma, fmt=".", ms=3, label=f"data {i}")
-    sub = run[i]
-    yi = sub.model.eval(xg, params=sub.results.params)
-    ax.plot(xg, yi, label="fit")
-    band = sub.band(xg, nsamples=300, level=2)
-    ax.fill_between(xg, band.low, band.high, alpha=0.2)
-    ax.set_title(f"system {i}")
-    ax.legend()
+flat = np.asarray(axs, dtype=object).ravel()
+for i in range(N_SYSTEMS):
+    title = flat[i].get_title()
+    flat[i].set_title(f"system {i}\n{title}" if title else f"system {i}")
+    flat[i].legend()
 
 plt.show()

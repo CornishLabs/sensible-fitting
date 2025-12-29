@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-from sensible_fitting import models
+from sensible_fitting import FitData, models
 
 
 # --- Build a model with a pure guesser ---------------------------------------
@@ -35,9 +35,18 @@ sigma = 0.25
 y_clean = model.eval(x, **true_params)
 y = y_clean + rng.normal(0, sigma, size=x.size)
 
+data = FitData.normal(
+    x=x,
+    y=y,
+    yerr=sigma,
+    x_label="time",
+    y_label="signal",
+    label="data",
+)
+
 # --- 1) Use Model.seed(...) to look at the seed curve ------------------------
 
-seed_params = model.seed(x, (y, sigma))
+seed_params = model.seed(data)
 print("Seed parameters:")
 for name, pv in seed_params.items():
     print(f"  {name:>10s} = {pv.value:.4g}")
@@ -45,8 +54,7 @@ for name, pv in seed_params.items():
 # --- 2) Do a seed-only 'fit' (optimise=False) -------------------------------------
 
 run_seed = model.fit(
-    x,
-    (y, sigma),
+    data,
     optimise=False,  # seed-only mode
 ).squeeze()
 
@@ -55,8 +63,7 @@ run_seed = model.fit(
 # --- 3) Do a real fit --------------------------------------------------------
 
 run_fit = model.fit(
-    x,
-    (y, sigma),
+    data,
 ).squeeze()
 
 res = run_fit.results
@@ -67,8 +74,7 @@ print(res.summary(digits=4))
 
 forced_seed = {"frequency": 6.0}
 run_forced_seed = model.fit(
-    x,
-    (y, sigma),
+    data,
     seed_override=forced_seed,
     optimise=False,  # use *only* this seed, no optimisation
 ).squeeze()
@@ -82,15 +88,11 @@ for name, pv in run_forced_seed.results.seed.items():
 xg = np.linspace(x.min(), x.max(), 400)
 
 y_seed = run_seed.predict(xg, which="seed")
-y_fit = run_fit.predict(xg, which="fit")
 y_forced = run_forced_seed.predict(xg, which="seed")  # seed-only run
 
 # --- Plot everything ----------------------------------------------------------
 
-fig, ax = plt.subplots(figsize=(8, 5))
-
-# data
-ax.errorbar(x, y, yerr=sigma, fmt="o", ms=3, capsize=2, label="data")
+fig, ax = run_fit.plot(xg=xg, line_kwargs={"label": "fit curve"})
 
 # true underlying curve (for illustration)
 ax.plot(xg, model.eval(xg, **true_params), "k:", label="true")
@@ -98,15 +100,8 @@ ax.plot(xg, model.eval(xg, **true_params), "k:", label="true")
 # seed-only curve (from seed engine + guesser)
 ax.plot(xg, y_seed, "--", label="seed curve")
 
-# fitted curve
-ax.plot(xg, y_fit, "-", label="fit curve")
-
 # forced seed curve (frequency fixed to 6.0)
 ax.plot(xg, y_forced, "-.", label="seed (frequency=6.0)")
 
-ax.set_xlabel("x")
-ax.set_ylabel("y")
 ax.legend()
-ax.set_title("Seed vs fit vs forced-seed using sensible_fitting")
-
 plt.show()

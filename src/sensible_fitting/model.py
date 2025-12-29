@@ -19,6 +19,7 @@ from warnings import warn
 
 from .backends import get_backend
 from .data import Dataset, prepare_datasets
+from .inputs import FitData
 from .params import DerivedSpec, GuessState, ParameterSpec, ParamView, ParamsView, _UncContext
 from .run import Results, Run
 from .util import (
@@ -188,7 +189,7 @@ class Model:
     def seed(
         self,
         x: Any,
-        data: Any,
+        data: Any = None,
         *,
         seed_override: Optional[Mapping[str, float]] = None,
         data_format: Optional[str] = None,
@@ -208,6 +209,14 @@ class Model:
         - lists otherwise are treated as array data when possible
         - pass strict=True to raise on ambiguous inputs
         """
+        if isinstance(x, FitData):
+            if data is not None:
+                raise TypeError("If x is FitData, do not also pass data=...")
+            fd = x
+            x = fd.x
+            data = fd.data
+            if data_format is None:
+                data_format = fd.data_format
 
         # Pick a sensible backend label (even though optimise=False won't call it).
         if data_format in ("binomial", "beta"):
@@ -238,10 +247,13 @@ class Model:
     def fit(
         self,
         x: Any,
-        data: Any,
+        data: Any = None,
         *,
         backend: Literal[
-            "scipy.curve_fit", "scipy.minimize", "ultranest"
+            "scipy.curve_fit",
+            "scipy.differential_evolution",
+            "scipy.minimize",
+            "ultranest",
         ] = "scipy.curve_fit",
         data_format: Optional[str] = None,
         parallel: Optional[Literal[None, "auto"]] = None,
@@ -262,7 +274,32 @@ class Model:
         Backend notes:
         - scipy.minimize supports cov_method="auto" (use hess_inv if available, else numdiff)
         - cov_method="numdiff" is more robust for non-Gaussian likelihoods
+        - scipy.differential_evolution is a global optimiser (requires finite bounds)
         """
+        meta: Optional[Dict[str, Any]] = None
+        if isinstance(x, FitData):
+            if data is not None:
+                raise TypeError("If x is FitData, do not also pass data=...")
+            fd = x
+            x = fd.x
+            data = fd.data
+            if data_format is None:
+                data_format = fd.data_format
+            elif fd.data_format is not None and data_format != fd.data_format:
+                raise ValueError(
+                    f"Conflicting data_format: FitData has {fd.data_format!r} but call passed {data_format!r}."
+                )
+
+            meta = dict(fd.meta)
+            if fd.x_label is not None:
+                meta["x_label"] = fd.x_label
+            if fd.y_label is not None:
+                meta["y_label"] = fd.y_label
+            if fd.label is not None:
+                meta["label"] = fd.label
+        elif data is None:
+            raise TypeError("fit() missing required argument: data")
+
         if rng is None:
             rng = np.random.default_rng()
         backend_options = dict(backend_options or {})
@@ -598,7 +635,11 @@ class Model:
             results=results,
             backend=backend,
             data_format=data_format,
-            data={"x": x, "data": data},
+            data=(
+                {"x": x, "data": data}
+                if not meta
+                else {"x": x, "data": data, "meta": meta}
+            ),
             success=(
                 bool(successes[0])
                 if batch_shape == ()

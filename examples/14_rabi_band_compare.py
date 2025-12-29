@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-from sensible_fitting import models
+from sensible_fitting import FitData, models
 
 
 def main() -> None:
@@ -36,30 +36,29 @@ def main() -> None:
     p_true = model.eval(x, **true)
     n = np.full(x.shape, 200, dtype=int)
     k = rng.binomial(n, p_true)
-    y = k / n
-    yerr = np.sqrt(np.clip(y * (1.0 - y) / n, 0.0, np.inf))
 
     xg = np.linspace(float(np.min(x)), float(np.max(x)), 400)
 
+    data = FitData.binomial(
+        x=x,
+        n=n,
+        k=k,
+        x_label="time",
+        y_label="population",
+        label="data",
+    )
+
     run_min = model.fit(
-        x,
-        (n, k),
-        data_format="binomial",
+        data,
         backend="scipy.minimize",
         backend_options={"cov_method": "numdiff"},
     ).squeeze()
-    band_min = run_min.band(xg, level=2, method="covariance")
-    y_min = run_min.predict(xg)
 
     run_ultra = model.fit(
-        x,
-        (n, k),
-        data_format="binomial",
+        data,
         backend="ultranest",
         # backend_options={"max_ncalls": 4000},
     ).squeeze()
-    band_ultra = run_ultra.band(xg, level=2, method="posterior")
-    y_ultra = run_ultra.predict(xg)
 
     print("scipy.minimize + numdiff")
     print(run_min.results.summary(digits=4))
@@ -68,13 +67,23 @@ def main() -> None:
     print(run_ultra.results.summary(digits=4))
 
     fig, ax = plt.subplots()
-    ax.errorbar(x, y, yerr=yerr, fmt=".", ms=4, alpha=0.6, label="data")
-    ax.plot(xg, y_min, label="minimize (numdiff)")
-    ax.fill_between(xg, band_min.low, band_min.high, alpha=0.2)
-    ax.plot(xg, y_ultra, label="ultranest")
-    ax.fill_between(xg, band_ultra.low, band_ultra.high, alpha=0.2)
-    ax.set_xlabel("time")
-    ax.set_ylabel("population")
+    run_min.plot(
+        ax=ax,
+        xg=xg,
+        title=False,
+        line_kwargs={"label": "minimize (numdiff)", "color": "C0"},
+        band_kwargs={"alpha": 0.2, "color": "C0"},
+    )
+    run_ultra.plot(
+        ax=ax,
+        xg=xg,
+        data=False,
+        title=False,
+        line_kwargs={"label": "ultranest", "color": "C1"},
+        band_kwargs={"alpha": 0.2, "color": "C1"},
+    )
+    ax.set_ylim(-0.05, 1.05)
+    ax.set_title("Rabi oscillation: minimize vs ultranest")
     ax.legend()
     plt.show()
 

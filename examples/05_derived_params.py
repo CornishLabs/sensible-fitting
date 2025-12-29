@@ -1,5 +1,7 @@
 import numpy as np
-from sensible_fitting import Model
+import matplotlib.pyplot as plt
+
+from sensible_fitting import FitData, Model
 
 
 def gaussian(x, amp, mu, sigma):
@@ -21,8 +23,20 @@ x = np.linspace(-3, 3, 200)
 sigma_y = 0.05
 y = model.eval(x, amp=1.0, mu=0.2, sigma=0.7) + rng.normal(0, sigma_y, size=x.size)
 
-run = model.fit(x, (y, sigma_y)).squeeze()
+data = FitData.normal(
+    x=x,
+    y=y,
+    yerr=sigma_y,
+    x_label="x",
+    y_label="signal",
+    label="data",
+)
+run = model.fit(data).squeeze()
 res = run.results
 
 print("sigma:", res["sigma"].value)
 print("fwhm :", res["fwhm"].value, "(derived:", res["fwhm"].derived, ")")
+
+fig, ax = run.plot(title_names=["amp", "mu", "sigma", "fwhm"])
+ax.legend()
+plt.show()

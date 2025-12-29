@@ -316,6 +316,21 @@ class Run:
 
         return self.model.eval(x, params=p)
 
+    def plot(
+        self,
+        *,
+        ax: Optional[Any] = None,
+        axs: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> Tuple[Any, Any]:
+        """Plot this run using sensible defaults.
+
+        This is a convenience wrapper around `sensible_fitting.viz.plot_run`.
+        """
+        from .viz import plot_run
+
+        return plot_run(run=self, ax=ax, axs=axs, **kwargs)
+
     def band(
         self,
         x: Any,

@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from sensible_fitting import models
+from sensible_fitting import FitData, models
 
 fit_data = False  # True => fit. False => plot seed only.
 
@@ -19,31 +19,25 @@ sigma = 0.6
 y = model.eval(x, amplitude=2.0, frequency=3.0) + rng.normal(0, sigma, size=x.size)
 
 # Always a Run; optimise=False => "seed only" mode
+data = FitData.normal(
+    x=x,
+    y=y,
+    yerr=sigma,
+    x_label="time",
+    y_label="signal",
+    label="data",
+)
 run = model.fit(
-    x,
-    (y, sigma),
+    data,
     optimise=fit_data,
 ).squeeze()
 
 res = run.results
 
-fig, ax = plt.subplots()
-ax.errorbar(x, y, yerr=sigma, fmt=".", ms=3, label="data")
-
 xg = np.linspace(x.min(), x.max(), 500)
-
 style = "-" if fit_data else "--"
-label = "fit" if fit_data else "seed fit"
-ax.plot(xg, run.model.eval(xg, params=res.params), linestyle=style, label=label)
-
-# Band only if covariance exists (i.e. we actually fitted)
-if res.cov is not None:
-    band = run.band(xg, level=2, nsamples=400)
-    ax.fill_between(xg, band.low, band.high, alpha=0.2, label="~2σ band")
-
+fig, ax = run.plot(xg=xg, line_kwargs={"linestyle": style})
 ax.legend()
-ax.set_xlabel("x")
-ax.set_ylabel("y")
 plt.show()
 
 print(res.summary(digits=5))

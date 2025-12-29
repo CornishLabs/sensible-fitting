@@ -1,8 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-from sensible_fitting import models
-from sensible_fitting.viz import plot_fit
+from sensible_fitting import FitData, models
 
 
 def main() -> None:
@@ -30,15 +29,19 @@ def main() -> None:
     p_true = model.eval(x, **true)
     n = np.full(x.shape, 200, dtype=int)
     k = rng.binomial(n, p_true)
-    y = k / n
-    yerr = np.sqrt(np.clip(y * (1.0 - y) / n, 0.0, np.inf))
 
-    fig, ax = plt.subplots()
+    data = FitData.binomial(
+        x=x,
+        n=n,
+        k=k,
+        x_label="time",
+        y_label="population",
+        label="data",
+    )
+
     # cov_method="auto" uses hess_inv if available; numdiff is steadier for binomial fits.
     runa = model.fit(
-        x,
-        (n, k),
-        data_format="binomial",
+        data,
         backend="scipy.minimize",
         backend_options={"cov_method": "numdiff"},
     ).squeeze()
@@ -46,40 +49,23 @@ def main() -> None:
 
     print(resa.summary(digits=5))
 
-    plot_fit(
-        ax=ax,
-        x=x,
-        y=y,
-        yerr=yerr,
-        run=runa,
-        band=True,
-        band_options={"level": 2, "nsamples": 400, "method": "auto"},
-        show_params=True,
-    )
     runb = model.fit(
-        x,
-        (n, k),
-        data_format="binomial",
-        backend="ultranest"
+        data,
+        backend="ultranest",
     ).squeeze()
     resb = runb.results
 
     print(resb.summary(digits=5))
 
-    plot_fit(
-        ax=ax,
-        x=x,
-        y=y,
-        yerr=yerr,
-        run=runb,
-        band=True,
-        band_options={"level": 2, "nsamples": 400, "method": "auto"},
-        show_params=True,
-    )
+    fig, axs = plt.subplots(1, 2, figsize=(11, 4), sharex=True, sharey=True, constrained_layout=True)
+    runa.plot(ax=axs[0], line_kwargs={"label": "scipy.minimize"})
+    runb.plot(ax=axs[1], line_kwargs={"label": "ultranest"})
 
-    ax.set_xlabel("time")
-    ax.set_ylabel("population")
-    ax.legend()
+    axs[0].set_title("scipy.minimize (numdiff)\n" + axs[0].get_title())
+    axs[1].set_title("ultranest\n" + axs[1].get_title())
+    for ax in axs:
+        ax.set_ylim(-0.05, 1.05)
+        ax.legend()
     plt.show()
 
 

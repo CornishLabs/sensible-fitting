@@ -1,6 +1,7 @@
 import numpy as np
+import matplotlib.pyplot as plt
 
-from sensible_fitting import models
+from sensible_fitting import FitData, models
 
 
 def main() -> None:
@@ -29,7 +30,15 @@ def main() -> None:
     y = y_clean + rng.normal(0, sigma, size=y_clean.shape)
 
     # Tuple data payload; y has batch shape (N_SYSTEMS, N) -> common-x batch fit.
-    run = model.fit(x, (y, sigma))
+    data = FitData.normal(
+        x=x,
+        y=y,
+        yerr=sigma,
+        x_label="time",
+        y_label="signal",
+        label="data",
+    )
+    run = model.fit(data)
     res = run.results
 
     print("batch_shape:", res.batch_shape)
@@ -82,6 +91,16 @@ def main() -> None:
     # 7) Using uncertainties: value ± stderr packaged as a uarray
     freq_u = res["frequency"].u
     print("frequency as uarray:", freq_u)
+
+    # Plot the 4 fits as a grid (also demonstrates batched plotting)
+    fig, axs = plt.subplots(2, 2, figsize=(10, 7), sharex=True, sharey=True, constrained_layout=True)
+    run.plot(axs=axs)
+    flat = np.asarray(axs, dtype=object).ravel()
+    for i in range(N_SYSTEMS):
+        title = flat[i].get_title()
+        flat[i].set_title(f"system {i}\n{title}" if title else f"system {i}")
+        flat[i].legend()
+    plt.show()
 
 
 if __name__ == "__main__":

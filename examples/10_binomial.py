@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import beta
 
-from sensible_fitting import Model
+from sensible_fitting import FitData, Model
 
 
 def p_step(x, x0, width):
@@ -30,17 +30,8 @@ k = rng.binomial(n.astype(int), p_true)  # successes
 
 # --- Fit ---------------------------------------------------------------------
 
-# Tuple payload (n, k); lists are reserved for ragged batches.
-run = model.fit(
-    x,
-    (n, k),
-    data_format="binomial",
-    backend="scipy.minimize",
-    # backend_options={
-    #     "method": "L-BFGS-B",
-    #     "options": {"maxiter": 2000},
-    # },
-).squeeze()
+data = FitData.binomial(x=x, n=n, k=k, x_label="x", y_label="p", label="data")
+run = model.fit(data, backend="scipy.minimize").squeeze()
 
 res = run.results
 print(res.summary(digits=4))
@@ -48,7 +39,6 @@ print(res.summary(digits=4))
 # --- Plot --------------------------------------------------------------------
 
 xg = np.linspace(x.min(), x.max(), 400)
-pg = run.predict(xg)
 
 fig, ax = plt.subplots()
 
@@ -82,16 +72,14 @@ ax.errorbar(
     label="data (posterior median ±1σ, Jeffreys)",
 )
 
-# Fit curve p(x)
-ax.plot(xg, pg, "-", label="fit p(x)")
-
-# Parameter band on p(x) (epistemic), if covariance exists
-if res.cov is not None:
-    band = run.band(xg, level=2, nsamples=400)
-    ax.fill_between(xg, band.low, band.high, alpha=0.2, label="~2σ parameter band")
+# Fit curve + parameter band, using the default plotting helper.
+run.plot(
+    ax=ax,
+    xg=xg,
+    data=False,  # we drew custom (Jeffreys) error bars above
+    line_kwargs={"label": "fit p(x)"},
+)
 
 ax.set_ylim(-0.05, 1.05)
-ax.set_xlabel("x")
-ax.set_ylabel("p")
 ax.legend()
 plt.show()

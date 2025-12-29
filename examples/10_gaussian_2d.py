@@ -77,6 +77,12 @@ def main() -> None:
         axs[1].set_title("fit (grid)")
         axs[2].imshow(resid, origin="lower", extent=[x.min(), x.max(), y.min(), y.max()])
         axs[2].set_title("residual")
+
+        pv = run_grid.results
+        title = ", ".join(
+            f"{n}={pv[n].value:.3g}" for n in ("amp", "x0", "y0", "sx", "sy", "offset")
+        )
+        fig.suptitle(title)
         plt.show()
 
 

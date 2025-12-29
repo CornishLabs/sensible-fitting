@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from sensible_fitting import Model
+from sensible_fitting import FitData, Model
 
 
 def line(x, m, b):
@@ -15,8 +15,9 @@ y_true = line(x, 2.0, -1.0)
 sigma = 1.2
 y = y_true + rng.normal(0, sigma, size=x.size)
 
-# Model.fit now always returns a Run
-run = model.fit(x, (y, sigma)).squeeze()
+# Model.fit now always returns a Run; FitData stores plotting metadata too.
+data = FitData.normal(x=x, y=y, yerr=sigma, x_label="x", y_label="y", label="data")
+run = model.fit(data).squeeze()
 res = run.results
 
 print(res["m"].value, "±", res["m"].stderr)
@@ -24,17 +25,9 @@ print(res["b"].value, "±", res["b"].stderr)
 print(res.summary(digits=4))
 
 
-# Plotting
-fig, ax = plt.subplots()
-ax.errorbar(x, y, yerr=sigma, fmt="o", ms=4, capsize=2, label="data")
-
+# Plotting (sensible defaults: data + fit + band + title)
 xg = np.linspace(x.min(), x.max(), 400)
-ax.plot(xg, run.predict(xg), label="fit")
-
-band = run.band(xg, nsamples=400, level=2)
-ax.fill_between(xg, band.low, band.high, alpha=0.2, label="~2σ band")
-
+fig, ax = run.plot(xg=xg)
+ax.plot(xg, line(xg, 2.0, -1.0), "k:", lw=1, label="true")
 ax.legend()
-ax.set_xlabel("x")
-ax.set_ylabel("y")
 plt.show()

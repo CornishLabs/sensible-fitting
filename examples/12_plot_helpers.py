@@ -1,8 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-from sensible_fitting import Model
-from sensible_fitting.viz import plot_fit
+from sensible_fitting import FitData, Model
 
 
 def line(x, m, b):
@@ -16,24 +15,13 @@ x = np.linspace(0, 10, 30)
 sigma = 1.0
 y = line(x, 2.0, -1.0) + rng.normal(0, sigma, size=x.size)
 
-run = model.fit(x, (y, sigma)).squeeze()
+data = FitData.normal(x=x, y=y, yerr=sigma, x_label="x", y_label="y")
+run = model.fit(data).squeeze()
 
 fig, ax = plt.subplots()
 
-plot_fit(
-    ax=ax,
-    x=x,
-    y=y,
-    yerr=sigma,
-    run=run,
-    band=True,
-    band_options={"level": 2, "nsamples": 400},
-    data_kwargs={"label": "data"},
-    line_kwargs={"label": "fit"},
-    show_params=True,
-)
+# High-level plotting: uses run.data + sensible defaults.
+run.plot(ax=ax)
 
-ax.set_xlabel("x")
-ax.set_ylabel("y")
 ax.legend()
 plt.show()
