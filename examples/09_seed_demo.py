@@ -95,7 +95,7 @@ y_forced = run_forced_seed.predict(xg, which="seed")  # seed-only run
 fig, ax = run_fit.plot(xg=xg, line_kwargs={"label": "fit curve"})
 
 # true underlying curve (for illustration)
-ax.plot(xg, model.eval(xg, **true_params), "k:", label="true")
+ax.plot(xg, model.eval(xg, **true_params), "k--", lw=1, label="true")
 
 # seed-only curve (from seed engine + guesser)
 ax.plot(xg, y_seed, "--", label="seed curve")

@@ -79,6 +79,7 @@ run.plot(
     data=False,  # we drew custom (Jeffreys) error bars above
     line_kwargs={"label": "fit p(x)"},
 )
+ax.plot(xg, p_step(xg, x0=0.2, width=0.35), "k--", lw=1, label="true")
 
 ax.set_ylim(-0.05, 1.05)
 ax.legend()

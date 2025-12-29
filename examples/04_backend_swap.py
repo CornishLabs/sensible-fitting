@@ -20,6 +20,7 @@ run_cf = model.fit(data, backend="scipy.curve_fit").squeeze()
 
 xg = np.linspace(x.min(), x.max(), 400)
 fig, ax = run_cf.plot(xg=xg, line_kwargs={"label": "scipy.curve_fit"})
+ax.plot(xg, line(xg, 1.7, -0.4), "k--", lw=1, label="true")
 
 ax.legend()
 plt.show()

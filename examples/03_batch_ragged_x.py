@@ -29,9 +29,14 @@ run = model.fit(data)
 print(run.results.summary(digits=4))
 
 fig, axs = plt.subplots(1, len(xs), figsize=(12, 3.5), sharey=True, constrained_layout=True)
-run.plot(axs=axs)
-for i, ax in enumerate(np.asarray(axs, dtype=object).ravel()):
-    title = ax.get_title()
-    ax.set_title(f"dataset {i}\n{title}" if title else f"dataset {i}")
+
+def _overlay_true(ax, subrun, idx):
+    x_i = np.asarray(subrun.data["x"], dtype=float)
+    xg = np.linspace(float(np.min(x_i)), float(np.max(x_i)), 400)
+    ax.plot(xg, 0.5 * xg - 0.1, "k--", lw=1, label="true")
+
+
+run.plot(axs=axs, panel_title="dataset {i}", each=_overlay_true)
+for ax in np.asarray(axs, dtype=object).ravel():
     ax.legend()
 plt.show()

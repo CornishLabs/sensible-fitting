@@ -8,7 +8,9 @@ import pytest
 
 EXAMPLES_DIR = Path(__file__).resolve().parents[1] / "examples"
 REPO_ROOT = EXAMPLES_DIR.parent
-EXAMPLE_FILES = sorted(p for p in EXAMPLES_DIR.glob("*.py") if p.is_file())
+# Only run numbered examples (01_*.py, 02_*.py, ...). This keeps helper scripts
+# in examples/ from being treated as CI examples.
+EXAMPLE_FILES = sorted(p for p in EXAMPLES_DIR.glob("[0-9][0-9]_*.py") if p.is_file())
 
 OPTIONAL_MODULE_HINTS = {
     "matplotlib": "matplotlib",

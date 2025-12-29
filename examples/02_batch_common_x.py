@@ -35,13 +35,23 @@ run = model.fit(data)
 res = run.results
 print(res.summary(digits=4))
 
-fig, axs = plt.subplots(2, 2, figsize=(10, 7), sharex=True, sharey=True, constrained_layout=True)
-run.plot(axs=axs)
+xg = np.linspace(x.min(), x.max(), 400)
 
-flat = np.asarray(axs, dtype=object).ravel()
-for i in range(N_SYSTEMS):
-    title = flat[i].get_title()
-    flat[i].set_title(f"system {i}\n{title}" if title else f"system {i}")
-    flat[i].legend()
+fig, axs = plt.subplots(2, 2, figsize=(10, 7), sharex=True, sharey=True, constrained_layout=True)
+
+def _overlay_true(ax, subrun, idx):
+    i = int(idx[0])
+    ax.plot(
+        xg,
+        model.eval(xg, amplitude=float(A[i]), frequency=float(F[i])),
+        "k--",
+        lw=1,
+        label="true",
+    )
+
+
+run.plot(axs=axs, xg=xg, panel_title="system {i}", each=_overlay_true)
+for ax in np.asarray(axs, dtype=object).ravel():
+    ax.legend()
 
 plt.show()

@@ -37,6 +37,8 @@ res = run.results
 print("sigma:", res["sigma"].value)
 print("fwhm :", res["fwhm"].value, "(derived:", res["fwhm"].derived, ")")
 
-fig, ax = run.plot(title_names=["amp", "mu", "sigma", "fwhm"])
+xg = np.linspace(float(np.min(x)), float(np.max(x)), 400)
+fig, ax = run.plot(xg=xg, title_names=["amp", "mu", "sigma", "fwhm"])
+ax.plot(xg, model.eval(xg, amp=1.0, mu=0.2, sigma=0.7), "k--", lw=1, label="true")
 ax.legend()
 plt.show()

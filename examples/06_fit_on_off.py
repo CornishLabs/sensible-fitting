@@ -37,6 +37,7 @@ res = run.results
 xg = np.linspace(x.min(), x.max(), 500)
 style = "-" if fit_data else "--"
 fig, ax = run.plot(xg=xg, line_kwargs={"linestyle": style})
+ax.plot(xg, model.eval(xg, amplitude=2.0, frequency=3.0), "k--", lw=1, label="true")
 ax.legend()
 plt.show()
 
