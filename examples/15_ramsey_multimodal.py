@@ -52,11 +52,7 @@ def main() -> None:
     run_cf = model.fit(data, backend="scipy.curve_fit").squeeze()
     run_ultra = model.fit(
         data,
-        backend="ultranest",
-        backend_options={
-            # Keep this example reasonably quick.
-            # "max_ncalls": 4000,
-        },
+        backend="ultranest"
     ).squeeze()
 
     print("scipy.curve_fit")
@@ -88,7 +84,7 @@ def main() -> None:
         ax=axs[1],
         xg=xg,
         title=False,
-        line_kwargs={"label": "ultranest mean", "color": "C1"},
+        line_kwargs={"label": "posterior median", "color": "C1"},
         band_kwargs={"alpha": 0.2, "color": "C1"},
         posterior_lines=60,
         posterior_lines_kwargs={"alpha": 0.05, "lw": 1.0},
@@ -117,4 +113,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -177,6 +177,16 @@ def plot_fit(
         if xg is None and (line or band or n_posterior_lines > 0):
             xg = np.linspace(float(np.min(x_arr)), float(np.max(x_arr)), 400)
 
+        # Compute band first so we can optionally use its median as the main line
+        # for posterior bands.
+        band_obj = None
+        if band:
+            try:
+                band_obj = run.band(xg, **band_options)
+            except Exception as exc:
+                warn(f"plot_fit: could not compute band: {exc}", UserWarning)
+                band_obj = None
+
         line_artist = None
         if line:
             yfit = run.predict(xg, which=which)
@@ -184,17 +194,12 @@ def plot_fit(
             line_kwargs.setdefault("zorder", 3)
             (line_artist,) = ax.plot(xg, yfit, **line_kwargs)
 
-        if band:
-            try:
-                band_obj = run.band(xg, **band_options)
-            except Exception as exc:
-                warn(f"plot_fit: could not compute band: {exc}", UserWarning)
-            else:
-                band_kwargs.setdefault("alpha", 0.2)
-                band_kwargs.setdefault("zorder", 1)
-                if line_artist is not None:
-                    band_kwargs.setdefault("color", line_artist.get_color())
-                ax.fill_between(xg, band_obj.low, band_obj.high, **band_kwargs)
+        if band_obj is not None:
+            band_kwargs.setdefault("alpha", 0.2)
+            band_kwargs.setdefault("zorder", 1)
+            if line_artist is not None:
+                band_kwargs.setdefault("color", line_artist.get_color())
+            ax.fill_between(xg, band_obj.low, band_obj.high, **band_kwargs)
 
         if n_posterior_lines > 0:
             res = getattr(run, "results", None)

@@ -39,7 +39,7 @@ res = run.results
 print(res.summary(digits=5))
 
 xg = np.linspace(x.min(), x.max(), 800)
-fig, ax = run.plot(xg=xg, line_kwargs={"label": "posterior mean"})
+fig, ax = run.plot(xg=xg, line_kwargs={"label": "posterior median"})
 ax.plot(xg, model.eval(xg, **true), "k--", lw=1, label="true")
 ax.legend()
 plt.show()

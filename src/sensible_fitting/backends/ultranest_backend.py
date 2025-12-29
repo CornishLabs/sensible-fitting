@@ -111,10 +111,15 @@ class UltraNestBackend:
 
             samples = np.asarray(result.get("samples", []), dtype=float)
             if samples.ndim != 2 or samples.shape[1] != len(free_names) or samples.shape[0] == 0:
-                mean = fallback_theta
+                center = fallback_theta
                 cov = None
             else:
-                mean = samples.mean(axis=0)
+                # Use a robust point estimate for the Run "main line".
+                # For multimodal posteriors (e.g. Ramsey fringe ambiguity), the mean
+                # can sit in a low-likelihood region between modes.
+                # Use a non-interpolating median to avoid landing between modes
+                # for fringe-ambiguous (effectively discrete) posteriors.
+                center = np.quantile(samples, 0.5, axis=0, method="nearest")
                 cov = np.cov(samples.T, ddof=1) if samples.shape[0] >= 2 else None
 
             stats: Dict[str, Any] = {
@@ -127,7 +132,7 @@ class UltraNestBackend:
             }
 
             return BackendResult(
-                theta=np.asarray(mean, dtype=float),
+                theta=np.asarray(center, dtype=float),
                 cov=None if cov is None else np.asarray(cov, dtype=float),
                 success=True,
                 message="ok",
