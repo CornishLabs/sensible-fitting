@@ -35,7 +35,7 @@ def main() -> None:
 
     N_REAL = 3  # number of realisations of (a_true, b_true)
     N_SYSTEMS = 5  # number of sinusoids per realisation
-    N = 300  # points per sinusoid
+    N = 50  # points per sinusoid
 
     x = np.linspace(0.0, 1.0, N)
     sigma_y = 0.2
@@ -136,7 +136,7 @@ def main() -> None:
             axs=axs,
             xg=xg,
             errorbars=False,
-            band=False,
+            band=True,
             data_kwargs={"marker": ".", "ms": 2, "alpha": 0.7},
             title_names=["frequency", "amplitude"],
         )
