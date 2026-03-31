@@ -4,6 +4,8 @@ repo_dump.txt
 
 ultranest_*/
 
+third_party/*
+
 # General
 .DS_Store
 __MACOSX/
