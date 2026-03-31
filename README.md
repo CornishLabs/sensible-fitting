@@ -30,7 +30,16 @@ Currently intended for development / source installs:
 pip install -e .
 ```
 
-Dependencies are listed in `pyproject.toml`.
+Optional extras:
+
+```bash
+pip install -e ".[plot]"                   # matplotlib-backed plotting helpers
+pip install -e ".[uncertainties]"          # correlated uncertainty helpers
+pip install -e ".[bayes]"                  # UltraNest backend (+ h5py)
+pip install -e ".[plot,uncertainties,bayes]"
+```
+
+Core installs only require `numpy` and `scipy`.
 
 ---
 
@@ -244,7 +253,8 @@ v1 implements:
 * `backend="scipy.minimize"` (required for `binomial`/`beta` currently)
 * `backend="ultranest"` (Bayesian nested sampling for `normal`)
 
-UltraNest requires either explicit priors (`Model.prior(...)`) or finite bounds for all free parameters.
+The UltraNest backend requires installing `sensible-fitting[bayes]`, and either
+explicit priors (`Model.prior(...)`) or finite bounds for all free parameters.
 
 ---
 
@@ -260,6 +270,6 @@ UltraNest requires either explicit priors (`Model.prior(...)`) or finite bounds 
 ## Development
 
 ```bash
-pip install -e ".[dev]"
+uv sync --group dev
 python examples/01_line.py
 ```

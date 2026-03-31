@@ -15,6 +15,7 @@ EXAMPLE_FILES = sorted(p for p in EXAMPLES_DIR.glob("[0-9][0-9]_*.py") if p.is_f
 OPTIONAL_MODULE_HINTS = {
     "matplotlib": "matplotlib",
     "ultranest": "ultranest",
+    "uncertainties": "uncertainties",
 }
 
 
