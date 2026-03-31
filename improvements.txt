@@ -19,6 +19,7 @@ the goal is a stable v1 API.
 - FitData helpers for sequential design (`FitData.append(...)`, `FitData.sorted()`).
 - “Next best point” helper (`Run.suggest_next_x`) using posterior/covariance.
 - Core tests + example smoke tests.
+- Removed inert `parallel=` argument from `Model.fit` / `Model.seed`.
 
 ## Next (priority order)
 
@@ -41,32 +42,28 @@ the goal is a stable v1 API.
    - When no Jacobian is provided, rely on SciPy finite differences (do not make
      autodiff a hard dependency).
 
-4. Resolve `parallel=` in `Model.fit`
-   - Either implement parallel fitting over independent datasets, or remove the
-     argument to avoid a misleading API surface.
-
-5. Dependency hygiene / packaging
+4. Dependency hygiene / packaging
    - Fix `pyproject.toml` metadata (description).
    - Move heavy deps behind extras (likely `ultranest` (+ `h5py`), maybe
      `uncertainties`) and keep core minimal (`numpy`, `scipy`).
 
-6. Priors as optional MAP penalties (minimal, explicit)
+5. Priors as optional MAP penalties (minimal, explicit)
    - Keep `Model.prior(...)` for Bayesian backends.
    - Optionally reuse priors as a penalty term for `scipy.minimize` /
      `least_squares` (MAP) behind an explicit flag; default remains MLE.
    - Avoid a general constraint-expression system; keep scope small.
 
-7. Bayesian reporting improvements
+6. Bayesian reporting improvements
    - Expose posterior summaries beyond mean/stderr (median and quantiles) for
      `ultranest`.
    - Make storage of large posterior objects configurable (avoid always storing
      full samples/results for big runs).
 
-8. Serialization / reproducibility
+7. Serialization / reproducibility
    - Add `Run.to_dict()` / `Run.from_dict()` for lightweight persistence.
    - Optional HDF5 support can live behind an extra.
 
-9. More built-in models + seeders
+8. More built-in models + seeders
    - Expand `sensible_fitting.models` with common AMO shapes and robust guessers.
 
 ## Open questions (need explicit decisions)
